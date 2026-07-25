@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kart Admin System 🏎️</title>
+
+    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-database-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-storage-compat.js"></script>
+
+    <link rel="stylesheet" href="https://pyscript.net/releases/2024.3.1/core.css">
+    <script type="module" src="https://pyscript.net/releases/2024.3.1/core.js"></script>
+
+    <style>
+        :root { --red: #ff4b4b; --dark: #0e1117; --card: #1d2129; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--dark); color: white; margin: 0; padding-bottom: 70px; }
+        .section { display: none; padding: 20px; }
+        .active { display: block; }
+        .navbar { position: fixed; bottom: 0; width: 100%; background: var(--card); display: flex; justify-content: space-around; padding: 10px 0; border-top: 2px solid var(--red); z-index: 1000; }
+        .nav-item { color: white; text-decoration: none; font-size: 11px; text-align: center; cursor: pointer; min-width: 50px; }
+        input, select, textarea { width: 100%; padding: 12px; margin: 8px 0; background: #333; border: 1px solid #444; color: white; border-radius: 8px; box-sizing: border-box; }
+        input:disabled, select:disabled { opacity: 0.65; cursor: not-allowed; background: #24272f; }
+        select[multiple] { min-height: 120px; }
+        button { width: 100%; padding: 15px; background: var(--red); border: none; color: white; font-weight: bold; border-radius: 8px; margin-top: 10px; cursor: pointer; }
+        .form-card { background: var(--card); padding: 20px; border-radius: 15px; border: 1px solid #333; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; background: var(--card); border-radius: 10px; overflow: hidden; font-size: 14px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #333; }
+        th { background: #252a34; color: var(--red); }
+        tr:nth-child(even) { background: #252a34; }
+        .btn-view { background: #2b3240; border: 1px solid #3a4252; padding: 5px 10px; font-size: 10px; width: auto; margin: 0; }
+        .btn-icon { width: 34px; height: 34px; margin: 0; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: #2b3240; border: 1px solid #3a4252; border-radius: 8px; font-size: 16px; }
+        .btn-icon:hover { filter: brightness(1.2); }
+        .actions { display: flex; gap: 8px; }
+        .tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+        .tab-btn { background: #252a34; border: 1px solid #3a4252; padding: 10px 12px; width: auto; margin: 0; }
+        .tab-btn.active-tab { background: var(--red); border-color: var(--red); }
+        .feedback { margin-top: 10px; font-size: 13px; color: #9ad99a; }
+        .error { color: #ff9898; }
+        .btn-day { background: #252a34; border: 1px solid #444; text-align: left; }
+        .piloto-card, .arquivo-card { display: flex; justify-content: space-between; align-items: center; background: #252a34; padding: 10px; border-radius: 8px; margin-bottom: 8px; border-left: 4px solid var(--red); gap: 10px; }
+        .arquivo-card small, .muted { color: #aaa; font-size: 11px; }
+        .file-label { display: block; margin-top: 12px; color: #ffeb3b; font-size: 13px; font-weight: bold; }
+        .hint { color: #aaa; font-size: 12px; margin: 0 0 10px 0; line-height: 1.4; }
+        .py-preview-card { background: #151a22; border: 1px solid #394150; border-radius: 12px; padding: 12px; margin-top: 14px; }
+        .py-status { color: #ffeb3b; font-size: 13px; margin: 8px 0; }
+        .py-table-wrapper { max-height: 360px; overflow: auto; border-radius: 10px; border: 1px solid #333; }
+        .pyscript-table { width: 100%; min-width: 0; font-size: 11px; table-layout: fixed; }
+        .pyscript-table th, .pyscript-table td { white-space: nowrap; padding: 8px; }
+        .py-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin: 8px 0 12px 0; }
+        .py-summary div { background: #252a34; border-radius: 8px; padding: 8px; font-size: 12px; }
+        .inline-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .inline-actions button { width: auto; padding: 10px 12px; margin-top: 8px; }
+        .table-fit { width: 100%; overflow-x: hidden; }
+        .consulta-subcard { background: #151a22; border: 1px solid #394150; border-radius: 12px; padding: 12px; margin-top: 12px; }
+        .rank-corrida-head { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; align-items: end; }
+        .rank-corrida-tabs { flex-wrap: nowrap; }
+        .rank-corrida-tabs .tab-btn { flex: 1 1 0; min-width: 0; padding-left: 8px; padding-right: 8px; white-space: nowrap; }
+        @media (max-width: 420px) {
+            .rank-corrida-tabs { gap: 6px; }
+            .rank-corrida-tabs .tab-btn { font-size: 12px; padding-left: 6px; padding-right: 6px; }
+        }
+
+
+        /* ===== Tela inicial / Central do Campeonato ===== */
+        .campeonato-home { max-width: 1240px; margin: 0 auto; }
+        .home-title-row { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:14px; }
+        .home-title-row h2 { margin:4px 0 2px; font-size:clamp(26px,4vw,38px); }
+        .home-kicker { display:inline-block; color:#ffb74d; font-size:11px; font-weight:800; letter-spacing:.16em; }
+        .home-subtitle { margin:0; font-size:13px; }
+        .home-filter-card { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; background:#171c24; border:1px solid #303744; border-radius:16px; padding:14px; margin-bottom:10px; box-shadow:0 10px 30px rgba(0,0,0,.16); }
+        .home-filter-card select { margin:5px 0 0; }
+        .home-filter-label { display:block; font-size:11px; color:#aeb6c4; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
+        .home-status { min-height:18px; margin:8px 2px 14px; color:#9ca6b5; font-size:12px; }
+        .champ-hero { display:grid; grid-template-columns:minmax(0,1.7fr) minmax(260px,.8fr); gap:14px; margin-bottom:14px; }
+        .champ-hero-main, .champ-hero-side { background:linear-gradient(145deg,#202631,#151a22); border:1px solid #343c49; border-radius:18px; padding:18px; box-shadow:0 12px 30px rgba(0,0,0,.18); }
+        .champ-hero-main { position:relative; overflow:hidden; }
+        .champ-hero-main:after { content:""; position:absolute; width:220px; height:220px; border-radius:50%; right:-80px; top:-100px; background:radial-gradient(circle,rgba(255,75,75,.22),rgba(255,75,75,0)); pointer-events:none; }
+        .champ-title { margin:0; font-size:clamp(22px,3vw,32px); }
+        .champ-meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:9px; color:#aeb6c4; font-size:12px; }
+        .champ-pill { padding:5px 9px; border-radius:999px; background:#2a303b; border:1px solid #3b4350; }
+        .hero-leader { display:flex; align-items:center; gap:12px; margin-top:18px; }
+        .hero-avatar, .dashboard-avatar { flex:0 0 auto; display:flex; align-items:center; justify-content:center; overflow:hidden; border-radius:50%; background:linear-gradient(135deg,#ff6b6b,#ffb74d); color:white; font-weight:800; border:2px solid rgba(255,255,255,.12); }
+        .hero-avatar { width:64px; height:64px; font-size:20px; }
+        .dashboard-avatar { width:58px; height:58px; font-size:17px; box-shadow:0 7px 16px rgba(0,0,0,.18); }
+        .hero-avatar img, .dashboard-avatar img { width:100%; height:100%; object-fit:cover; }
+        .hero-leader-label { color:#9ca6b5; font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+        .hero-leader-name { font-size:19px; font-weight:800; margin-top:2px; }
+        .hero-leader-score { color:#ffca6b; font-weight:800; margin-top:3px; }
+        .hero-side-number { font-size:36px; line-height:1; font-weight:900; color:#ffb74d; }
+        .hero-side-label { color:#aeb6c4; font-size:12px; margin-top:5px; }
+        .hero-side-divider { height:1px; background:#343c49; margin:14px 0; }
+        .dashboard-section-title { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:20px 2px 10px; }
+        .dashboard-section-title h3 { margin:0; font-size:18px; }
+        .dashboard-section-title span { color:#8f99a8; font-size:11px; }
+        .dashboard-cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+        .dashboard-card { min-height:205px; border-radius:16px; padding:15px 13px; text-align:center; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; border:1px solid rgba(255,255,255,.07); box-shadow:0 10px 24px rgba(0,0,0,.14); }
+        .dashboard-card:nth-child(8n+1) { background:linear-gradient(145deg,#27233d,#211f32); }
+        .dashboard-card:nth-child(8n+2) { background:linear-gradient(145deg,#38222e,#2b2028); }
+        .dashboard-card:nth-child(8n+3) { background:linear-gradient(145deg,#1f3043,#1d2836); }
+        .dashboard-card:nth-child(8n+4) { background:linear-gradient(145deg,#3a3320,#2d2a20); }
+        .dashboard-card:nth-child(8n+5) { background:linear-gradient(145deg,#1d3b33,#1d2e2a); }
+        .dashboard-card:nth-child(8n+6) { background:linear-gradient(145deg,#3c2728,#2e2224); }
+        .dashboard-card:nth-child(8n+7) { background:linear-gradient(145deg,#242b43,#202437); }
+        .dashboard-card:nth-child(8n+8) { background:linear-gradient(145deg,#183a3a,#1b2f31); }
+        .dashboard-card-title { width:100%; font-weight:800; font-size:14px; margin:1px 0 11px; }
+        .dashboard-card-name { font-weight:800; font-size:15px; margin-top:10px; line-height:1.2; }
+        .dashboard-card-value { color:#ffca6b; font-weight:900; font-size:18px; margin-top:4px; line-height:1.25; }
+        .dashboard-card-desc { color:#aeb6c4; font-size:11px; line-height:1.35; margin-top:auto; padding-top:10px; }
+        .dashboard-empty-mark { width:58px; height:58px; display:flex; align-items:center; justify-content:center; border-radius:50%; border:1px solid #4b5360; color:#8f99a8; font-weight:700; }
+        .podium-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:14px; }
+        .podium-card { background:#171c24; border:1px solid #303744; border-radius:16px; padding:14px; display:flex; align-items:center; gap:12px; min-width:0; }
+        .podium-pos { width:34px; height:34px; border-radius:10px; background:#252c37; display:flex; align-items:center; justify-content:center; font-weight:900; color:#ffca6b; }
+        .podium-info { min-width:0; }
+        .podium-name { font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .podium-meta { color:#9ca6b5; font-size:11px; margin-top:3px; }
+        .dashboard-table-card { background:#171c24; border:1px solid #303744; border-radius:16px; padding:14px; margin-bottom:14px; overflow:hidden; }
+        .dashboard-table-wrap { width:100%; overflow-x:auto; }
+        .dashboard-table { min-width:680px; margin:0; background:transparent; }
+        .dashboard-table th { background:#222833; color:#ff9e9e; }
+        .dashboard-table td, .dashboard-table th { padding:10px 9px; font-size:12px; }
+        .dashboard-driver-cell { display:flex; align-items:center; gap:8px; min-width:180px; }
+        .dashboard-mini-avatar { width:30px; height:30px; flex:0 0 30px; border-radius:50%; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#303744; font-size:10px; font-weight:800; }
+        .dashboard-mini-avatar img { width:100%; height:100%; object-fit:cover; }
+        .dashboard-note { color:#7f8998; font-size:10px; margin-top:8px; line-height:1.4; }
+        .dashboard-mobile-only { display:none; }
+        @media (max-width: 950px) {
+            .dashboard-cards { grid-template-columns:repeat(2,minmax(0,1fr)); }
+            .champ-hero { grid-template-columns:1fr; }
+        }
+        @media (max-width: 680px) {
+            .section { padding:14px; }
+            .home-filter-card { grid-template-columns:1fr; }
+            .dashboard-cards { grid-template-columns:1fr 1fr; gap:9px; }
+            .dashboard-card { min-height:190px; padding:12px 9px; }
+            .dashboard-card-title { font-size:12px; }
+            .dashboard-card-name { font-size:13px; }
+            .dashboard-card-value { font-size:15px; }
+            .dashboard-card-desc { font-size:10px; }
+            .podium-grid { grid-template-columns:1fr; }
+            .champ-hero-main, .champ-hero-side { padding:14px; }
+        }
+        @media (max-width: 430px) {
+            .dashboard-cards { grid-template-columns:1fr; }
+        }
+
+    </style>
+</head>
+<body>
+
+<div id="loading" style="padding: 20px; text-align: center;">Sincronizando Firebase...</div>
+
+<div id="dash" class="section active campeonato-home">
+    <div class="home-title-row">
+        <div>
+            <span class="home-kicker">🏁 TEMPORADA</span>
+            <h2>Central do Campeonato</h2>
+            <p class="hint home-subtitle">Resumo do campeonato, destaques dos pilotos e resultados por etapa.</p>
+        </div>
+    </div>
+
+    <div class="home-filter-card">
+        <div>
+            <label class="home-filter-label" for="filtro_rank_firebase_camp">Campeonato</label>
+            <select id="filtro_rank_firebase_camp" onchange="onCampeonatoRankingChange()"></select>
+        </div>
+        <div>
+            <label class="home-filter-label" for="filtro_rank_etapa">Visualização</label>
+            <select id="filtro_rank_etapa" onchange="onEtapaDashboardChange()">
+                <option value="geral">🏆 Geral do campeonato</option>
+            </select>
+        </div>
+    </div>
+
+    <div id="rankingFirestoreStatus" class="home-status">Selecione um campeonato para carregar os dados.</div>
+    <div id="rankingFirestoreContent"></div>
+</div>
+
+<div id="historico" class="section">
+    <h2>📜 Consultar Arquivos</h2>
+    <div class="form-card">
+        <p class="hint">Clique em um dia disponível para visualizar os arquivos enviados daquele dia.</p>
+        <div id="listaHistorico">Carregando dias...</div>
+        <div id="arquivosDoDia" style="margin-top: 15px;"></div>
+        <div id="resultadoDoDia" style="margin-top: 15px;"></div>
+    </div>
+</div>
+
+<div id="importar" class="section">
+    <div class="form-card">
+        <h2>📂 Importar Arquivo</h2>
+        <p class="hint">Selecione o campeonato, a etapa, a data, o tipo de arquivo e envie apenas um arquivo por vez.</p>
+
+        <select id="imp_camp" onchange="atualizarPreviewImportacaoAtual()"></select>
+        <input type="number" id="imp_etapa" placeholder="Etapa (obrigatório)" min="1">
+        <input type="date" id="imp_data">
+
+        <label class="file-label" for="imp_tipo_arquivo">Tipo de arquivo</label>
+        <select id="imp_tipo_arquivo" onchange="onTipoArquivoImportChange()">
+            <option value="">Selecione o tipo de arquivo</option>
+            <option value="resultado_final">Resultado final</option>
+            <option value="classificacao">Classificação</option>
+            <option value="volta_a_volta">Volta a volta</option>
+        </select>
+
+        <label class="file-label" for="fileImportacaoUnico" id="labelFileImportacao">Arquivo</label>
+        <input type="file" id="fileImportacaoUnico" accept=".html,.htm,.xml,.pdf">
+
+        <label class="file-label">História da corrida com IA</label>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0; color:#fff; font-size:13px;">
+            <input type="checkbox" id="imp_gerar_historia_ia" style="width:auto; margin:0;">
+            Gerar história geral e história por piloto ao salvar/importar
+        </label>
+        <input type="password" id="imp_gemini_key" placeholder="Chave API Gemini — usada só no navegador, não é salva no Firestore" autocomplete="off">
+        <input type="text" id="imp_gemini_model" value="gemini-2.5-flash-lite" placeholder="Modelo Gemini">
+        <p class="hint">Para gerar a história, importe o Volta a volta por último. Ao selecionar esse arquivo, o sistema lista apenas os pilotos vinculados ao campeonato para você marcar quem receberá a história individual. A chave da IA é usada só no navegador e não é salva no Firestore.</p>
+
+        <div id="pyPreviewCard" class="py-preview-card">
+            <h3>🐍 Leitura do arquivo</h3>
+            <p class="hint">O Python lê o arquivo no navegador e envia os dados para a lista única de importação abaixo.</p>
+            <div id="pyStatus" class="py-status">Selecione o tipo de arquivo e depois escolha o arquivo.</div>
+        </div>
+
+        <button onclick="fazerBackupEProcessar()" style="background: #2196F3;">SALVAR ARQUIVO / GERAR PRÉVIA</button>
+        <div id="statusImport" style="text-align: center; margin-top: 10px; color: #ffeb3b;"></div>
+        <div id="previewImportacao" style="margin-top: 15px;"></div>
+        <button id="btnConfirmarImportacao" onclick="confirmarImportacao()" style="display:none;">IMPORTAR SELECIONADOS PARA O FIREBASE</button>
+    </div>
+</div>
+
+
+<div id="gestao" class="section">
+    <h2>⚙️ Opções</h2>
+    <div class="form-card">
+        <div class="tabs">
+            <button id="tabCampeonatos" class="tab-btn active-tab" onclick="trocarAbaGestao('campeonatos')">Campeonatos</button>
+            <button id="tabPilotos" class="tab-btn" onclick="trocarAbaGestao('pilotos')">Pilotos</button>
+        </div>
+
+        <div id="secCampeonatos">
+            <h3>Campeonatos</h3>
+            <p class="hint">Para editar um campeonato existente, a chave/ID fica bloqueada. Altere apenas as informações descritivas.</p>
+            <input id="camp_nome" placeholder="Nome do campeonato (obrigatório para novo cadastro)">
+            <input id="camp_descricao" placeholder="Descrição">
+            <input id="camp_data_inicio" type="date" placeholder="Data de início">
+            <input id="camp_data_fim" type="date" placeholder="Data de fim">
+            <div class="inline-actions">
+                <button onclick="salvarCampeonato()">Salvar campeonato</button>
+                <button onclick="limparFormularioCampeonato()" style="background:#2b3240; border:1px solid #3a4252;">Novo / limpar</button>
+            </div>
+            <div id="feedbackCampeonato" class="feedback"></div>
+            <div id="listaCampeonatos" style="margin-top: 10px;"></div>
+        </div>
+
+        <div id="secPilotos" style="display:none;">
+            <h3>Pilotos</h3>
+            <p class="hint">Para editar um piloto existente, o id_piloto fica bloqueado. Altere nome, apelido e campeonatos vinculados.</p>
+            <input id="piloto_id" placeholder="id_piloto (obrigatório para novo cadastro)">
+            <input id="piloto_nome" placeholder="Nome (obrigatório)">
+            <input id="piloto_apelido" placeholder="Apelido">
+            <input id="piloto_foto" type="url" placeholder="Foto URL (opcional, usada no dashboard)">
+            <label class="file-label" for="piloto_campeonatos">Campeonatos vinculados</label>
+            <select id="piloto_campeonatos" multiple></select>
+            <div class="inline-actions">
+                <button onclick="salvarPiloto()">Salvar piloto</button>
+                <button onclick="limparFormularioPiloto()" style="background:#2b3240; border:1px solid #3a4252;">Novo / limpar</button>
+            </div>
+            <div id="feedbackPiloto" class="feedback"></div>
+            <div id="listaPilotos" style="margin-top: 10px;"></div>
+        </div>
+    </div>
+</div>
+
+<nav class="navbar">
+    <div class="nav-item" onclick="show('dash')">🏆<br>Campeonato</div>
+    <div class="nav-item" onclick="show('historico'); carregarHistorico();">📜<br>Consultar</div>
+    <div class="nav-item" onclick="show('importar')">📂<br>Importar</div>
+        <div class="nav-item" onclick="abrirGestao()">⚙️<br>Opções</div>
+</nav>
+
+<script src="script.js"></script>
+<script type="py" src="kart_parser.py" config="./pyscript.toml"></script>
+</body>
+</html>

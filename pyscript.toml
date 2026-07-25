@@ -1,0 +1,1 @@
+packages = ["pandas", "beautifulsoup4", "html5lib"]
