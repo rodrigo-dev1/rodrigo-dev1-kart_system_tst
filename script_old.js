@@ -636,9 +636,10 @@ async function salvarArquivoSemPreviewNoFirestore({ campeonato, etapa, dataCorri
 }
 
 async function salvarPilotoGlobalNoFirestore(p, campeonato) {
-    const idPilotoBruto = String(p.driver_id || p.id_piloto || "").trim();
-    const nomeArquivo = String(p.driver_name || p.nome || p.piloto || "").trim();
-    const pilotoSelecionado = getPilotoSelecionadoImportacao(p);
+    const item = normalizarIdentidadePilotoVinculado(p);
+    const pilotoSelecionado = getPilotoSelecionadoImportacao(item);
+    const idPilotoBruto = String(item.driver_id || item.id_piloto || "").trim();
+    const nomeArquivo = String(item.driver_name || item.nome || item.piloto || "").trim();
     const pilotoSimilarSemId = !pilotoSelecionado && idPilotoBruto && nomeArquivo
         ? buscarPilotosSimilaresPorNome(nomeArquivo).find(piloto => !String(piloto.id_piloto || piloto.driver_id || "").trim())
         : null;
@@ -654,9 +655,9 @@ async function salvarPilotoGlobalNoFirestore(p, campeonato) {
     const dadosAtuais = snapshot.exists ? snapshot.data() || {} : (pilotoSelecionado || pilotoSimilarSemId || {});
     const campeonatosAtuais = extrairCampeonatosDoPilotoExistente(dadosAtuais);
     const idAtual = String(dadosAtuais.id_piloto || dadosAtuais.driver_id || "").trim();
-    const idFinal = idPilotoBruto || idAtual;
+    const idFinal = pilotoSelecionado ? (idAtual || idPilotoBruto) : (idPilotoBruto || idAtual);
     const nomeAtual = String(dadosAtuais.nome || dadosAtuais.driver_name || "").trim();
-    const nomeFinal = nomeArquivo || nomeAtual || idFinal || docIdDestino;
+    const nomeFinal = pilotoSelecionado ? (nomeAtual || nomeArquivo || idFinal || docIdDestino) : (nomeArquivo || nomeAtual || idFinal || docIdDestino);
 
     const aliasesDoCampeonato = aliasesCampeonato(campeonato);
     const jaVinculado = campeonatosAtuais.some(v =>
@@ -683,7 +684,9 @@ async function salvarPilotoGlobalNoFirestore(p, campeonato) {
             : "importacao_arquivo",
         ultimoCampeonatoImportado: campeonato,
         atualizadoEmISO: new Date().toISOString(),
-        criadoEmISO: dadosAtuais.criadoEmISO || new Date().toISOString()
+        criadoEmISO: dadosAtuais.criadoEmISO || new Date().toISOString(),
+        ultimo_driver_id_arquivo: item.driver_id_arquivo || "",
+        ultimo_driver_name_arquivo: item.driver_name_arquivo || ""
     });
 
     await pilotoRef.set(payload, { merge: true });
@@ -796,13 +799,34 @@ function extrairPilotoHeaderVoltaAVolta(texto) {
         };
     }
 
-    const matchSomenteId = limpo.match(/\[(\d+)\]\s*(.*)$/);
+    // Alguns kartódromos exportam o cabeçalho sem [driver_id], por exemplo:
+    // "041 - BRENO MANTOVANI - RENTAL". Antes esse texto inteiro virava o
+    // nome do piloto e acabava criando cadastros duplicados.
+    const partes = limpo.split(/\s+-\s+/).map(v => v.trim()).filter(Boolean);
+
+    if (partes.length >= 2 && /^\d+$/.test(partes[0])) {
+        const kartNumero = partes.shift();
+        const classe = partes.length >= 2 ? partes.pop() : "";
+        const nome = partes.join(" - ").trim();
+
+        if (nome) {
+            return {
+                kart_numero: kartNumero,
+                driver_id: "",
+                driver_name: nome,
+                classe,
+                piloto_original: limpo
+            };
+        }
+    }
+
+    const matchSomenteId = limpo.match(/^\[(\d+)\]\s*(.*?)(?:\s*-\s*(.*))?$/);
 
     return {
         kart_numero: "",
         driver_id: matchSomenteId ? matchSomenteId[1] : "",
         driver_name: matchSomenteId ? matchSomenteId[2].trim() : limpo,
-        classe: "",
+        classe: matchSomenteId ? String(matchSomenteId[3] || "").trim() : "",
         piloto_original: limpo
     };
 }
@@ -934,6 +958,34 @@ function getPilotoSelecionadoImportacao(item) {
     if (!docId) return null;
 
     return DB.pilotos.find(p => String(p.id || "") === docId) || null;
+}
+
+function normalizarIdentidadePilotoVinculado(item) {
+    const pilotoSelecionado = getPilotoSelecionadoImportacao(item);
+    const driverIdArquivo = String(item?.driver_id || item?.id_piloto || "").trim();
+    const driverNameArquivo = String(item?.driver_name || item?.nome || item?.piloto || "").trim();
+    const driverIdSelecionado = String(pilotoSelecionado?.id_piloto || pilotoSelecionado?.driver_id || "").trim();
+    const driverNameSelecionado = String(pilotoSelecionado?.nome || pilotoSelecionado?.driver_name || "").trim();
+
+    // Quando o usuário escolhe explicitamente um cadastro, esse cadastro é a
+    // identidade canônica. O ID/nome do arquivo ficam apenas como referência.
+    const driverId = pilotoSelecionado
+        ? (driverIdSelecionado || driverIdArquivo)
+        : driverIdArquivo;
+    const driverName = pilotoSelecionado
+        ? (driverNameSelecionado || driverNameArquivo || driverId)
+        : (driverNameArquivo || driverId);
+
+    return {
+        ...item,
+        driver_id_arquivo: driverIdArquivo,
+        driver_name_arquivo: driverNameArquivo,
+        driver_id: driverId,
+        id_piloto: driverId,
+        driver_name: driverName,
+        nome: driverName,
+        pilotoVinculadoDocId: pilotoSelecionado?.id || item?.pilotoVinculadoDocId || ""
+    };
 }
 
 function pilotoTemMesmoIdArquivo(piloto, driverId) {
@@ -1206,27 +1258,14 @@ function chavePilotoHistoriaMap(item) {
 }
 
 function normalizarPilotoSelecionadoHistoriaVoltaAVolta(item) {
-    const pilotoVinculado = getPilotoSelecionadoImportacao(item);
-    const driverId = String(
-        item?.driver_id ||
-        item?.id_piloto ||
-        pilotoVinculado?.id_piloto ||
-        pilotoVinculado?.driver_id ||
-        ""
-    ).trim();
-    const driverName = String(
-        item?.driver_name ||
-        item?.nome ||
-        item?.piloto ||
-        pilotoVinculado?.nome ||
-        pilotoVinculado?.driver_name ||
-        "-"
-    ).trim() || "-";
+    const normalizado = normalizarIdentidadePilotoVinculado(item);
+    const driverId = String(normalizado.driver_id || normalizado.id_piloto || "").trim();
+    const driverName = String(normalizado.driver_name || normalizado.nome || "-").trim() || "-";
 
     if (!driverId && driverName === "-") return null;
 
     return {
-        ...item,
+        ...normalizado,
         checked: true,
         driver_id: driverId,
         id_piloto: driverId,
@@ -1262,9 +1301,66 @@ function obterPilotosSelecionadosHistoriaVoltaAVolta(campeonato = "") {
     return selecionados.sort((a, b) => String(a.driver_name || "").localeCompare(String(b.driver_name || "")));
 }
 
+function linhaResultadoTemPosicaoValida(data) {
+    return [
+        data?.posicao_final2,
+        data?.posicao_final,
+        data?.posicao_geral_arquivo,
+        data?.posicao,
+        data?.pos
+    ].some(valor => Number.isFinite(Number(valor)) && Number(valor) > 0);
+}
+
+function linhaResultadoEhFantasmaVoltaAVolta(data) {
+    if (!data || linhaResultadoTemPosicaoValida(data)) return false;
+    if (String(data.tipoArquivo || "").toLowerCase() === "resultado_final") return false;
+
+    return !!(
+        data.selecionado_para_historia ||
+        data.ultimoVoltaAVoltaImportado ||
+        data.voltas_volta_a_volta !== undefined ||
+        data.melhor_tempo_volta_a_volta !== undefined
+    );
+}
+
+function normalizarKartComparacao(valor) {
+    const texto = String(valor ?? "").trim();
+    if (!texto) return "";
+    const apenasNumero = texto.replace(/\D/g, "");
+    if (!apenasNumero) return texto.toUpperCase();
+    return String(Number(apenasNumero));
+}
+
+function encontrarResultadoExistenteParaPiloto(rows, piloto) {
+    const id = String(piloto?.driver_id || piloto?.id_piloto || "").trim();
+    const nome = normalizarNomeComparacao(piloto?.driver_name || piloto?.nome || "");
+    const kart = normalizarKartComparacao(piloto?.kart_numero || piloto?.kart || "");
+    const validos = (rows || []).filter(row => !linhaResultadoEhFantasmaVoltaAVolta(row.data || {}));
+
+    if (id) {
+        const porId = validos.find(row => String(row.data?.driver_id || row.data?.id_piloto || row.docId || "").trim() === id);
+        if (porId) return porId;
+    }
+
+    if (nome) {
+        const porNome = validos.find(row => normalizarNomeComparacao(row.data?.driver_name || row.data?.nome || "") === nome);
+        if (porNome) return porNome;
+    }
+
+    if (kart) {
+        const porKart = validos.filter(row => normalizarKartComparacao(row.data?.kart_numero || row.data?.kart || "") === kart);
+        if (porKart.length === 1) return porKart[0];
+    }
+
+    return null;
+}
+
 async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, etapa, dataCorrida, selecionados, backupId = "", nomeArquivo = "" }) {
     if (!Array.isArray(selecionados) || !selecionados.length) return null;
 
+    const selecionadosCanonicos = selecionados
+        .map(normalizarIdentidadePilotoVinculado)
+        .filter(p => p.driver_id || p.driver_name);
     const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
     const resultadoDocId = getResultadoFinalDocId(etapa, dataCorrida);
     const resultadoDocRef = campRef.collection("resultado_final").doc(resultadoDocId);
@@ -1272,10 +1368,20 @@ async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, eta
 
     await salvarPilotosImportadosNoFirestore({
         campeonato,
-        selecionados
+        selecionados: selecionadosCanonicos
     });
 
+    // O Volta a volta não pode criar novas linhas em pilotos_resultado. Essa
+    // coleção representa somente quem foi importado no Resultado Final.
+    const resultadoSnapshot = await resultadoDocRef.collection("pilotos_resultado").get();
+    const resultadoRows = resultadoSnapshot.docs.map(doc => ({ docId: doc.id, ref: doc.ref, data: doc.data() || {} }));
     const batch = firestore.batch();
+
+    // Remove apenas linhas antigas inequivocamente criadas pelo bug anterior:
+    // tinham dados de volta/história, mas nenhuma posição de corrida.
+    resultadoRows.forEach(row => {
+        if (linhaResultadoEhFantasmaVoltaAVolta(row.data)) batch.delete(row.ref);
+    });
 
     batch.set(resultadoDocRef, toFirestoreSafe({
         campeonato,
@@ -1287,10 +1393,14 @@ async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, eta
         voltaAVoltaResumo: {
             nomeArquivo,
             idImportacao: backupId || "",
-            qtdPilotosSelecionadosHistoria: selecionados.length,
-            pilotosSelecionados: selecionados.map(p => ({
+            qtdPilotosSelecionadosHistoria: selecionadosCanonicos.length,
+            pilotosSelecionados: selecionadosCanonicos.map(p => ({
                 driver_id: p.driver_id || p.id_piloto || "",
                 driver_name: p.driver_name || p.nome || "",
+                driver_id_arquivo: p.driver_id_arquivo || "",
+                driver_name_arquivo: p.driver_name_arquivo || "",
+                kart_numero: p.kart_numero || "",
+                piloto_doc_id: p.pilotoVinculadoDocId || "",
                 voltas: Number(p.voltas || 0),
                 melhor_tempo: p.melhor_tempo || ""
             })),
@@ -1299,7 +1409,7 @@ async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, eta
         atualizadoEmISO: agoraISO
     }), { merge: true });
 
-    selecionados.forEach((piloto, idx) => {
+    selecionadosCanonicos.forEach((piloto, idx) => {
         const itemId = normalizarDocId(piloto.driver_id || piloto.id_piloto || piloto.driver_name || `piloto_${idx + 1}`);
         const payloadBase = toFirestoreSafe({
             campeonato,
@@ -1310,6 +1420,9 @@ async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, eta
             id_piloto: piloto.driver_id || piloto.id_piloto || "",
             driver_name: piloto.driver_name || piloto.nome || "-",
             nome: piloto.driver_name || piloto.nome || "-",
+            driver_id_arquivo: piloto.driver_id_arquivo || "",
+            driver_name_arquivo: piloto.driver_name_arquivo || "",
+            piloto_doc_id: piloto.pilotoVinculadoDocId || "",
             kart_numero: piloto.kart_numero || "",
             classe: piloto.classe || "",
             voltas: Number(piloto.voltas || 0),
@@ -1328,21 +1441,18 @@ async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, eta
 
         batch.set(resultadoDocRef.collection("volta_a_volta_pilotos").doc(itemId), payloadBase, { merge: true });
 
-        batch.set(resultadoDocRef.collection("pilotos_resultado").doc(itemId), toFirestoreSafe({
-            driver_id: piloto.driver_id || piloto.id_piloto || "",
-            id_piloto: piloto.driver_id || piloto.id_piloto || "",
-            driver_name: piloto.driver_name || piloto.nome || "-",
-            nome: piloto.driver_name || piloto.nome || "-",
-            kart_numero: piloto.kart_numero || "",
-            classe: piloto.classe || "",
-            voltas_volta_a_volta: Number(piloto.voltas || 0),
-            melhor_tempo_volta_a_volta: piloto.melhor_tempo || "",
-            melhor_tempo_volta_a_volta_segundos: piloto.melhor_tempo_segundos ?? null,
-            selecionado_para_historia: true,
-            historia_status: "pendente",
-            ultimoVoltaAVoltaImportado: backupId || "",
-            atualizadoEmISO: agoraISO
-        }), { merge: true });
+        // Só complementa uma linha de resultado que já existe. Nunca cria uma
+        // linha de corrida a partir do arquivo Volta a volta.
+        const existente = encontrarResultadoExistenteParaPiloto(resultadoRows, piloto);
+        if (existente) {
+            batch.set(existente.ref, toFirestoreSafe({
+                voltas_volta_a_volta: Number(piloto.voltas || 0),
+                melhor_tempo_volta_a_volta: piloto.melhor_tempo || "",
+                melhor_tempo_volta_a_volta_segundos: piloto.melhor_tempo_segundos ?? null,
+                ultimoVoltaAVoltaImportado: backupId || "",
+                atualizadoEmISO: agoraISO
+            }), { merge: true });
+        }
     });
 
     await batch.commit();
@@ -1353,7 +1463,7 @@ async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, eta
     return {
         resultadoDocId,
         caminhoFirestore: `${COLLECTION_CAMPEONATOS}/${campeonatoDocId}/resultado_final/${resultadoDocId}/volta_a_volta_pilotos`,
-        qtdPilotos: selecionados.length
+        qtdPilotos: selecionadosCanonicos.length
     };
 }
 
@@ -1624,19 +1734,20 @@ async function salvarHistoriaPilotoFirestore({ resultadoDocRef, piloto, historia
     const historiaRef = resultadoDocRef.collection("historias_pilotos").doc(itemId);
     const voltaPilotoRef = resultadoDocRef.collection("volta_a_volta_pilotos").doc(itemId);
 
-    const [classificacaoDoc] = await Promise.all([
-        classificacaoRef.get()
+    const [classificacaoDoc, corridaDoc] = await Promise.all([
+        classificacaoRef.get(),
+        corridaRef.get()
     ]);
 
     const writes = [
         historiaRef.set(payload, { merge: true }),
-        voltaPilotoRef.set(payload, { merge: true }),
-        corridaRef.set(payload, { merge: true })
+        voltaPilotoRef.set(payload, { merge: true })
     ];
 
-    if (classificacaoDoc.exists) {
-        writes.push(classificacaoRef.set(payload, { merge: true }));
-    }
+    // História não cria participante no resultado. Só complementa a linha se
+    // ela já tiver vindo do arquivo Resultado Final.
+    if (corridaDoc.exists) writes.push(corridaRef.set(payload, { merge: true }));
+    if (classificacaoDoc.exists) writes.push(classificacaoRef.set(payload, { merge: true }));
 
     await Promise.all(writes);
 }
@@ -1817,11 +1928,14 @@ async function gerarHistoriasAposImportacao({
                 atualizadoEmISO: agoraISO
             });
 
-            await Promise.all([
+            const corridaErroRef = dados.resultadoDocRef.collection("pilotos_resultado").doc(itemId);
+            const corridaErroSnap = await corridaErroRef.get();
+            const writesErro = [
                 dados.resultadoDocRef.collection("historias_pilotos").doc(itemId).set(payloadErro, { merge: true }),
-                dados.resultadoDocRef.collection("volta_a_volta_pilotos").doc(itemId).set(payloadErro, { merge: true }),
-                dados.resultadoDocRef.collection("pilotos_resultado").doc(itemId).set(payloadErro, { merge: true })
-            ]);
+                dados.resultadoDocRef.collection("volta_a_volta_pilotos").doc(itemId).set(payloadErro, { merge: true })
+            ];
+            if (corridaErroSnap.exists) writesErro.push(corridaErroRef.set(payloadErro, { merge: true }));
+            await Promise.all(writesErro);
         }
     }
 
@@ -1918,12 +2032,13 @@ async function salvarHistoriaManual(ctx, texto, audioInfo = {}) {
             atualizadoEmISO: agoraISO
         });
         const classificacaoRef = resultadoDocRef.collection("classificacao").doc(itemId);
-        const classificacaoSnap = await classificacaoRef.get();
+        const corridaRef = resultadoDocRef.collection("pilotos_resultado").doc(itemId);
+        const [classificacaoSnap, corridaSnap] = await Promise.all([classificacaoRef.get(), corridaRef.get()]);
         const writes = [
             resultadoDocRef.collection("historias_pilotos").doc(itemId).set(payloadAudio, { merge: true }),
-            resultadoDocRef.collection("volta_a_volta_pilotos").doc(itemId).set(payloadAudio, { merge: true }),
-            resultadoDocRef.collection("pilotos_resultado").doc(itemId).set(payloadAudio, { merge: true })
+            resultadoDocRef.collection("volta_a_volta_pilotos").doc(itemId).set(payloadAudio, { merge: true })
         ];
+        if (corridaSnap.exists) writes.push(corridaRef.set(payloadAudio, { merge: true }));
         if (classificacaoSnap.exists) writes.push(classificacaoRef.set(payloadAudio, { merge: true }));
         await Promise.all(writes);
         return;
@@ -2049,16 +2164,18 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
         caminhoFirestore: `${COLLECTION_CAMPEONATOS}/${campeonatoDocId}/resultado_final/${resultadoDocId}`
     }), { merge: true });
 
+    const selecionadosCanonicos = (selecionados || []).map(normalizarIdentidadePilotoVinculado);
+
     await salvarPilotosImportadosNoFirestore({
         campeonato,
-        selecionados
+        selecionados: selecionadosCanonicos
     });
 
     const batch = firestore.batch();
     const subcollectionName = cfg.tipo === "classificacao" ? "classificacao" : "pilotos_resultado";
     const resumoField = cfg.tipo === "classificacao" ? "classificacaoResumo" : "resultadoFinalResumo";
 
-    selecionados.forEach((p, idx) => {
+    selecionadosCanonicos.forEach((p, idx) => {
         const itemId = normalizarDocId(p.driver_id || p.driver_name || `piloto_${idx + 1}`);
         const ref = resultadoDocRef.collection(subcollectionName).doc(itemId);
 
@@ -2098,9 +2215,9 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
             tipoLabel: cfg.label,
             idImportacao: importId,
             nomeArquivo: nomeArquivo || "",
-            qtdSelecionados: selecionados.length,
+            qtdSelecionados: selecionadosCanonicos.length,
             atualizadoEmISO: agoraISO,
-            pilotosSelecionados: selecionados.map((p, idx) => ({
+            pilotosSelecionados: selecionadosCanonicos.map((p, idx) => ({
                 ordem: idx + 1,
                 id_piloto: p.driver_id || "",
                 driver_id: p.driver_id || "",
@@ -4744,6 +4861,53 @@ function dashboardOrdenarResultado(rows) {
     );
 }
 
+function dashboardCanonicalizarVoltasEtapa(voltas, corrida, classificacao, pilotosCampeonato = [], vinculosVolta = []) {
+    const candidatos = [...(corrida || []), ...(classificacao || []), ...(vinculosVolta || []), ...(pilotosCampeonato || [])];
+    const porId = new Map();
+    const porNome = new Map();
+    const porKartLista = new Map();
+
+    candidatos.forEach(c => {
+        const id = String(c?.driver_id || c?.id_piloto || "").trim();
+        const nome = normalizarNomeComparacao(c?.driver_name || c?.nome || "");
+        const kart = normalizarKartComparacao(c?.kart_numero || c?.kart || "");
+        if (id && !porId.has(id)) porId.set(id, c);
+        if (nome && !porNome.has(nome)) porNome.set(nome, c);
+        if (kart) {
+            if (!porKartLista.has(kart)) porKartLista.set(kart, []);
+            porKartLista.get(kart).push(c);
+        }
+    });
+
+    return (voltas || []).map(v => {
+        const id = String(v?.driver_id || v?.id_piloto || "").trim();
+        const nome = normalizarNomeComparacao(v?.driver_name || v?.nome || "");
+        const kart = normalizarKartComparacao(v?.kart_numero || v?.kart || "");
+        let match = id ? porId.get(id) : null;
+        if (!match && nome) match = porNome.get(nome) || null;
+        if (!match && kart) {
+            const porKart = porKartLista.get(kart) || [];
+            const idsUnicos = new Set(porKart.map(c => String(c?.driver_id || c?.id_piloto || c?.piloto_doc_id || "").trim()).filter(Boolean));
+            if (porKart.length === 1 || idsUnicos.size === 1) match = porKart[0] || null;
+        }
+        if (!match) return v;
+
+        const driverId = String(match.driver_id || match.id_piloto || "").trim() || id;
+        const driverName = String(match.driver_name || match.nome || "").trim() || String(v.driver_name || "").trim();
+
+        return {
+            ...v,
+            driver_id_arquivo: String(v.driver_id || v.id_piloto || "").trim(),
+            driver_name_arquivo: String(v.driver_name || v.nome || "").trim(),
+            driver_id: driverId,
+            id_piloto: driverId,
+            driver_name: driverName,
+            nome: driverName,
+            piloto_doc_id: match.piloto_doc_id || match.pilotoVinculadoDocId || ""
+        };
+    });
+}
+
 function dashboardDesvioPadrao(valores) {
     const nums = (valores || []).map(Number).filter(Number.isFinite);
     if (nums.length < 2) return null;
@@ -5536,7 +5700,7 @@ async function renderRankingFirestore() {
    apenas consulta dashboardResumo (etapa) e dashboardGeral (campeonato).
    ============================================================================ */
 
-const DASHBOARD_RESUMO_VERSION = 2;
+const DASHBOARD_RESUMO_VERSION = 3;
 
 function dashboardPilotoPersistivel(item) {
     if (!item) return null;
@@ -5840,14 +6004,27 @@ async function dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVo
     return { voltas: [], fonte: { idImportacao: "", nomeArquivo: "", origem: "ausente" } };
 }
 
+async function dashboardLimparLinhasFantasmaVoltaAVolta(resultadoDocRef) {
+    const snap = await resultadoDocRef.collection("pilotos_resultado").get();
+    const fantasmas = snap.docs.filter(doc => linhaResultadoEhFantasmaVoltaAVolta(doc.data() || {}));
+    if (!fantasmas.length) return 0;
+
+    const batch = firestore.batch();
+    fantasmas.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+    return fantasmas.length;
+}
+
 async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, conteudoVoltaAtual = "", nomeArquivoVoltaAtual = "", idImportacaoVoltaAtual = "", atualizarGeral = true }) {
     const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
     const resultadoDocId = getResultadoFinalDocId(etapa, dataCorrida);
     const resultadoDocRef = campRef.collection("resultado_final").doc(resultadoDocId);
-    const [resultadoSnap, corridaSnap, classificacaoSnap] = await Promise.all([
+    await dashboardLimparLinhasFantasmaVoltaAVolta(resultadoDocRef);
+    const [resultadoSnap, corridaSnap, classificacaoSnap, vinculosVoltaSnap] = await Promise.all([
         resultadoDocRef.get(),
         resultadoDocRef.collection("pilotos_resultado").get(),
-        resultadoDocRef.collection("classificacao").get()
+        resultadoDocRef.collection("classificacao").get(),
+        resultadoDocRef.collection("volta_a_volta_pilotos").get()
     ]);
 
     const meta = {
@@ -5864,7 +6041,15 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
     const classificacao = classificacaoSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
         .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId, pilotosCampeonato));
     const voltaInfo = await dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVoltaAtual, nomeArquivoVoltaAtual, idImportacaoVoltaAtual);
-    const voltas = (voltaInfo.voltas || []).filter(item => linhaPertenceAoCampeonatoRanking(item, "", pilotosCampeonato));
+    const vinculosVolta = vinculosVoltaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const voltasCanonicas = dashboardCanonicalizarVoltasEtapa(
+        voltaInfo.voltas || [],
+        corrida,
+        classificacao,
+        pilotosCampeonato,
+        vinculosVolta
+    );
+    const voltas = voltasCanonicas.filter(item => linhaPertenceAoCampeonatoRanking(item, "", pilotosCampeonato));
     const etapaObj = { docId: resultadoDocId, ref: resultadoDocRef, meta, corrida, classificacao, voltas };
     const stat = dashboardEstatisticasEtapa(etapaObj);
     const resumo = dashboardSerializarEstatisticasEtapa(stat, {
@@ -5930,6 +6115,44 @@ async function recalcularEPersistirDashboardAposImportacao(args) {
     }
 }
 
+async function limparCadastrosDuplicadosCriadosPorVoltaAVolta(campeonato) {
+    const snap = await firestore.collection(COLLECTION_PILOTOS).get();
+    const docs = snap.docs.map(doc => ({ id: doc.id, ref: doc.ref, data: doc.data() || {} }));
+    let removidos = 0;
+
+    for (const item of docs) {
+        const nomeAtual = String(item.data.nome || item.data.driver_name || "").trim();
+        const origem = String(item.data.origemCadastro || "").trim();
+        const parsed = extrairPilotoHeaderVoltaAVolta(nomeAtual);
+        const pareceHeaderVolta = !!parsed.kart_numero && !!parsed.driver_name && normalizarNomeComparacao(parsed.driver_name) !== normalizarNomeComparacao(nomeAtual);
+
+        // Só toca em registros criados automaticamente pelo fluxo de importação
+        // e cujo nome ficou claramente no formato "kart - nome - classe".
+        if (!pareceHeaderVolta || origem !== "importacao_arquivo") continue;
+
+        const nomeCanonico = normalizarNomeComparacao(parsed.driver_name);
+        const candidatos = docs.filter(outro => {
+            if (outro.id === item.id) return false;
+            const nomeOutro = normalizarNomeComparacao(outro.data.nome || outro.data.driver_name || "");
+            const idOutro = String(outro.data.id_piloto || outro.data.driver_id || (/^\d+$/.test(outro.id) ? outro.id : "")).trim();
+            return nomeOutro === nomeCanonico && !!idOutro;
+        });
+
+        if (candidatos.length !== 1) continue;
+        const canonico = candidatos[0];
+        const campsCanonico = extrairCampeonatosDoPilotoExistente(canonico.data);
+        const aliases = aliasesCampeonato(campeonato);
+        const vinculado = campsCanonico.some(v => aliases.has(v) || aliases.has(normalizarDocId(v)) || aliases.has(normalizarChave(v)));
+        if (!vinculado) continue;
+
+        await item.ref.delete();
+        removidos += 1;
+    }
+
+    if (removidos) await carregarDadosBaseFirestore();
+    return removidos;
+}
+
 async function reprocessarResumosDashboardCampeonatoAtual() {
     if (!await pedirSenhaAdmin()) return;
     const campeonato = document.getElementById("imp_camp")?.value || "";
@@ -5937,7 +6160,8 @@ async function reprocessarResumosDashboardCampeonatoAtual() {
     if (!campeonato) return alert("Selecione o campeonato na tela de importação.");
 
     try {
-        if (status) status.innerHTML = "⏳ Reprocessando resumos persistidos do campeonato...";
+        if (status) status.innerHTML = "⏳ Limpando vínculos antigos do Volta a volta e reprocessando resumos...";
+        const duplicadosRemovidos = await limparCadastrosDuplicadosCriadosPorVoltaAVolta(campeonato);
         const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
         const etapasSnap = await campRef.collection("resultado_final").get();
         const etapas = etapasSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
@@ -5956,7 +6180,7 @@ async function reprocessarResumosDashboardCampeonatoAtual() {
         }
 
         await recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonato);
-        if (status) status.innerHTML = `✅ Resumos persistidos atualizados: ${etapas.length} etapa(s). A tela inicial agora apenas consulta os resultados salvos.`;
+        if (status) status.innerHTML = `✅ Resumos persistidos atualizados: ${etapas.length} etapa(s). ${duplicadosRemovidos ? `${duplicadosRemovidos} cadastro(s) duplicado(s) antigo(s) do Volta a volta foram removidos. ` : ""}A tela inicial agora apenas consulta os resultados salvos.`;
         await inicializarRankingFirestore();
     } catch (e) {
         console.error(e);
@@ -5965,7 +6189,7 @@ async function reprocessarResumosDashboardCampeonatoAtual() {
 }
 window.reprocessarResumosDashboardCampeonatoAtual = reprocessarResumosDashboardCampeonatoAtual;
 
-/* V2: consulta apenas documentos de resumo. Não reabre HTML nem recalcula métricas ao exibir a home. */
+/* V3: consulta apenas documentos de resumo. Corrige vínculo do Volta a volta e melhor largada. */
 async function carregarDashboardCampeonato(campeonatoDocId, force = false) {
     if (!force && DASHBOARD_CAMPEONATO_CACHE.has(campeonatoDocId)) return DASHBOARD_CAMPEONATO_CACHE.get(campeonatoDocId);
 
