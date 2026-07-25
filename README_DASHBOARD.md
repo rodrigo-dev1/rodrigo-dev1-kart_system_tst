@@ -48,3 +48,17 @@ O fluxo de importação não foi alterado. Os cálculos extras usam os arquivos 
 - **Grand Chelem**: hat-trick + liderança em todas as voltas analisadas.
 
 Quando o volta a volta não está disponível com conteúdo, os cards dependentes dele ficam sem dados; resultado, pole e melhor volta continuam funcionando.
+
+
+## Dashboard persistido v2
+
+A partir desta versão, os cálculos dos cards não são refeitos ao abrir a home. Depois de cada importação de Resultado Final, Classificação ou Volta a Volta, o sistema recalcula a etapa com todos os arquivos já disponíveis e grava:
+
+```text
+campeonato/{campeonato}/resultado_final/{etapa_data}.dashboardResumo
+campeonato/{campeonato}.dashboardGeral
+```
+
+Assim, a tela inicial faz somente consultas aos resumos persistidos. A importação pode ocorrer em qualquer ordem: a cada arquivo salvo, o resumo parcial é atualizado; quando os três arquivos estiverem presentes, todos os cards dependentes de volta a volta ficam disponíveis.
+
+Para corridas antigas existe o botão **REPROCESSAR RESUMOS DO CAMPEONATO** na tela Importar. Ele lê os dados já existentes uma vez e persiste os novos resumos.

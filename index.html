@@ -223,6 +223,8 @@
         </div>
 
         <button onclick="fazerBackupEProcessar()" style="background: #2196F3;">SALVAR ARQUIVO / GERAR PRÉVIA</button>
+        <button onclick="reprocessarResumosDashboardCampeonatoAtual()" style="background:#6d4c9a; margin-top:8px;">🔄 REPROCESSAR RESUMOS DO CAMPEONATO</button>
+        <p class="hint" style="margin-top:6px;">Use este botão uma única vez para etapas importadas antes desta atualização. Novas importações atualizam os resumos automaticamente.</p>
         <div id="statusImport" style="text-align: center; margin-top: 10px; color: #ffeb3b;"></div>
         <div id="previewImportacao" style="margin-top: 15px;"></div>
         <button id="btnConfirmarImportacao" onclick="confirmarImportacao()" style="display:none;">IMPORTAR SELECIONADOS PARA O FIREBASE</button>

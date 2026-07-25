@@ -2219,6 +2219,15 @@ async function fazerBackupEProcessar() {
                 status.innerHTML = `✅ ${cfg.label} salvo no Firestore. Caminho: ${htmlEscape(caminho)}. Backup: ${htmlEscape(backupInfo.caminhoFirestore)}.${historiaMsg ? `<br>${htmlEscape(historiaMsg)}` : ""}`;
             }
 
+            await recalcularEPersistirDashboardAposImportacao({
+                campeonato,
+                etapa,
+                dataCorrida,
+                conteudoVoltaAtual: cfg.tipo === "volta_a_volta" ? conteudoRaw : "",
+                nomeArquivoVoltaAtual: cfg.tipo === "volta_a_volta" ? file.name : "",
+                idImportacaoVoltaAtual: cfg.tipo === "volta_a_volta" ? idUnico : ""
+            });
+
             document.getElementById("fileImportacaoUnico").value = "";
             await inicializarRankingFirestore();
             return;
@@ -2275,6 +2284,12 @@ async function fazerBackupEProcessar() {
             selecionados: selecionadosParaSalvar,
             nomeArquivo: file.name,
             backupId: idUnico
+        });
+
+        await recalcularEPersistirDashboardAposImportacao({
+            campeonato,
+            etapa,
+            dataCorrida
         });
 
         let historiaMsg = "";
@@ -2756,6 +2771,12 @@ async function confirmarImportacao() {
             cfg,
             selecionados,
             nomeArquivo
+        });
+
+        await recalcularEPersistirDashboardAposImportacao({
+            campeonato,
+            etapa,
+            dataCorrida: data
         });
 
         let historiaMsg = "";
@@ -5507,6 +5528,551 @@ async function renderRankingFirestore() {
     return renderDashboardCampeonato();
 }
 
+
+
+/* ============================================================================
+   DASHBOARD PERSISTIDO V2
+   Os cálculos acontecem durante a importação/reprocessamento. A tela inicial
+   apenas consulta dashboardResumo (etapa) e dashboardGeral (campeonato).
+   ============================================================================ */
+
+const DASHBOARD_RESUMO_VERSION = 2;
+
+function dashboardPilotoPersistivel(item) {
+    if (!item) return null;
+    return toFirestoreSafe({
+        driver_id: item.driver_id || item.id_piloto || "",
+        id_piloto: item.id_piloto || item.driver_id || "",
+        driver_name: item.driver_name || item.nome || item.piloto || "-",
+        nome: item.nome || item.driver_name || item.piloto || "-",
+        kart_numero: item.kart_numero || item.kart_number || "",
+        classe: item.classe || "",
+        posicao_final2: Number(item.posicao_final2 || 0),
+        posicao_final: Number(item.posicao_final || 0),
+        posicao_geral_arquivo: Number(item.posicao_geral_arquivo || 0),
+        posicao_largada_campeonato: Number(item.posicao_largada_campeonato || item.posicao_classificacao_campeonato || 0),
+        pontos: Number(item.pontos || 0),
+        melhor_tempo_ponto: Number(item.melhor_tempo_ponto || 0),
+        voltas: item.voltas ?? null,
+        total_tempo: item.total_tempo || "",
+        total_tempo_segundos: item.total_tempo_segundos ?? null,
+        melhor_tempo: item.melhor_tempo || "",
+        melhor_tempo_segundos: item.melhor_tempo_segundos ?? null,
+        diff: item.diff || "",
+        espaco: item.espaco || "",
+        s1_melhor_vlt: item.s1_melhor_vlt ?? null,
+        s2_melhor_vlt: item.s2_melhor_vlt ?? null,
+        s3_melhor_vlt: item.s3_melhor_vlt ?? null,
+        sfspd_melhor_vlt: item.sfspd_melhor_vlt ?? null
+    });
+}
+
+function dashboardPilotoMetricaPersistivel(item) {
+    if (!item) return null;
+    return toFirestoreSafe({
+        driver_id: item.driver_id || item.id_piloto || "",
+        id_piloto: item.id_piloto || item.driver_id || "",
+        driver_name: item.driver_name || item.nome || item.piloto || "-",
+        nome: item.nome || item.driver_name || item.piloto || "-",
+        kart_numero: item.kart_numero || ""
+    });
+}
+
+function dashboardListaMapaPersistivel(mapa, camposExtras = []) {
+    if (!mapa) return [];
+    const valores = mapa instanceof Map ? [...mapa.values()] : (Array.isArray(mapa) ? mapa : []);
+    return valores.map(item => {
+        const base = { piloto: dashboardPilotoMetricaPersistivel(item.piloto) };
+        camposExtras.forEach(campo => { base[campo] = item[campo] ?? null; });
+        return toFirestoreSafe(base);
+    });
+}
+
+function dashboardSerializarEstatisticasEtapa(stat, fontes = {}) {
+    const m = stat.metricas || {};
+    return toFirestoreSafe({
+        versao: DASHBOARD_RESUMO_VERSION,
+        atualizadoEmISO: new Date().toISOString(),
+        completo: {
+            resultado_final: !!stat.corrida?.length,
+            classificacao: !!stat.classificacao?.length,
+            volta_a_volta: Number(m.totalVoltasLider || 0) > 0
+        },
+        fontes,
+        qtdPilotosCorrida: stat.corrida?.length || 0,
+        qtdPilotosClassificacao: stat.classificacao?.length || 0,
+        qtdVoltasAnalisadas: Number(m.totalVoltasLider || 0),
+        corrida: (stat.corrida || []).map(dashboardPilotoPersistivel),
+        classificacao: (stat.classificacao || []).map(dashboardPilotoPersistivel),
+        podium: (stat.podium || []).map(dashboardPilotoPersistivel),
+        vencedor: dashboardPilotoPersistivel(stat.vencedor),
+        pole: dashboardPilotoPersistivel(stat.pole),
+        melhorVolta: stat.melhorVolta ? {
+            piloto: dashboardPilotoMetricaPersistivel(stat.melhorVolta.piloto),
+            tempo: Number(stat.melhorVolta.tempo || 0)
+        } : null,
+        hatTrick: dashboardPilotoPersistivel(stat.hatTrick),
+        grandChelem: dashboardPilotoPersistivel(stat.grandChelem),
+        metricas: {
+            ultrapassagens: dashboardListaMapaPersistivel(m.ultrapassagens, ["total"]),
+            lideradas: dashboardListaMapaPersistivel(m.lideradas, ["total"]),
+            regularidade: dashboardListaMapaPersistivel(m.regularidade, ["desvio", "limpas", "pace"]),
+            melhorLargada: m.melhorLargada ? {
+                piloto: dashboardPilotoMetricaPersistivel(m.melhorLargada.piloto),
+                ganho: Number(m.melhorLargada.ganho || 0),
+                grid: Number(m.melhorLargada.grid || 0),
+                posVolta1: Number(m.melhorLargada.posVolta1 || 0)
+            } : null,
+            topUltrapassagens: m.topUltrapassagens ? {
+                piloto: dashboardPilotoMetricaPersistivel(m.topUltrapassagens.piloto),
+                total: Number(m.topUltrapassagens.total || 0)
+            } : null,
+            topLideradas: m.topLideradas ? {
+                piloto: dashboardPilotoMetricaPersistivel(m.topLideradas.piloto),
+                total: Number(m.topLideradas.total || 0)
+            } : null,
+            topRegularidade: m.topRegularidade ? {
+                piloto: dashboardPilotoMetricaPersistivel(m.topRegularidade.piloto),
+                desvio: Number(m.topRegularidade.desvio || 0),
+                limpas: Number(m.topRegularidade.limpas || 0),
+                pace: Number(m.topRegularidade.pace || 0)
+            } : null,
+            totalVoltasLider: Number(m.totalVoltasLider || 0)
+        }
+    });
+}
+
+function dashboardHidratarEstatisticasEtapa(meta, resumo, docId = "") {
+    const r = resumo || {};
+    const m = r.metricas || {};
+    return {
+        persistido: !!r.versao,
+        etapa: { docId, meta: { ...(meta || {}), resultadoDocId: docId } },
+        corrida: Array.isArray(r.corrida) ? r.corrida : [],
+        classificacao: Array.isArray(r.classificacao) ? r.classificacao : [],
+        podium: Array.isArray(r.podium) ? r.podium : [],
+        vencedor: r.vencedor || null,
+        pole: r.pole || null,
+        melhorVolta: r.melhorVolta || null,
+        hatTrick: r.hatTrick || null,
+        grandChelem: r.grandChelem || null,
+        completo: r.completo || {},
+        metricas: {
+            ultrapassagens: Array.isArray(m.ultrapassagens) ? m.ultrapassagens : [],
+            lideradas: Array.isArray(m.lideradas) ? m.lideradas : [],
+            regularidade: Array.isArray(m.regularidade) ? m.regularidade : [],
+            melhorLargada: m.melhorLargada || null,
+            topUltrapassagens: m.topUltrapassagens || null,
+            topLideradas: m.topLideradas || null,
+            topRegularidade: m.topRegularidade || null,
+            totalVoltasLider: Number(m.totalVoltasLider || r.qtdVoltasAnalisadas || 0)
+        }
+    };
+}
+
+function dashboardRankingDasEtapasPersistidas(etapasStats) {
+    const mapa = new Map();
+    const garantir = piloto => {
+        const key = dashboardPilotoKey(piloto);
+        if (!key) return null;
+        if (!mapa.has(key)) mapa.set(key, {
+            ...dashboardPilotoMetricaPersistivel(piloto),
+            pontos_posicao_corrida: 0,
+            pontos_melhor_tempo_corrida: 0,
+            pontos_melhor_tempo_classificacao: 0,
+            pontos_total: 0,
+            etapas: []
+        });
+        return mapa.get(key);
+    };
+
+    (etapasStats || []).forEach(stat => {
+        const etapaNumero = stat.etapa?.meta?.etapa || "-";
+        const dataCorrida = stat.etapa?.meta?.dataCorrida || "-";
+
+        (stat.corrida || []).forEach(p => {
+            const linha = garantir(p);
+            if (!linha) return;
+            const pontos = Number(p.pontos || 0);
+            const bonus = Number(p.melhor_tempo_ponto || 0);
+            linha.pontos_posicao_corrida += pontos;
+            linha.pontos_melhor_tempo_corrida += bonus;
+            linha.pontos_total += pontos + bonus;
+            linha.etapas.push({ tipo: "Resultado Final", etapa: etapaNumero, dataCorrida, pontos, melhor_tempo_ponto: bonus, posicao_final2: dashboardPosicaoCampeonato(p), melhor_tempo: p.melhor_tempo || "-" });
+        });
+
+        (stat.classificacao || []).forEach(p => {
+            const linha = garantir(p);
+            if (!linha) return;
+            const bonus = Math.max(Number(p.melhor_tempo_ponto || 0), Number(p.pontos || 0));
+            linha.pontos_melhor_tempo_classificacao += bonus;
+            linha.pontos_total += bonus;
+            linha.etapas.push({ tipo: "Classificação", etapa: etapaNumero, dataCorrida, pontos: bonus, melhor_tempo_ponto: bonus, posicao_final2: dashboardPosicaoCampeonato(p), melhor_tempo: p.melhor_tempo || "-" });
+        });
+    });
+
+    return [...mapa.values()].sort((a, b) =>
+        Number(b.pontos_total || 0) - Number(a.pontos_total || 0) ||
+        dashboardNomePiloto(a).localeCompare(dashboardNomePiloto(b))
+    );
+}
+
+function dashboardMapaGeralPersistivel(mapa) {
+    if (!(mapa instanceof Map)) return [];
+    return [...mapa.values()].map(item => toFirestoreSafe({
+        piloto: dashboardPilotoMetricaPersistivel(item.piloto),
+        total: Number(item.total || 0)
+    }));
+}
+
+function dashboardSerializarGeral(geral, ranking, etapasStats) {
+    return toFirestoreSafe({
+        versao: DASHBOARD_RESUMO_VERSION,
+        atualizadoEmISO: new Date().toISOString(),
+        qtdEtapas: etapasStats.length,
+        qtdPilotos: ranking.length,
+        ranking,
+        vitorias: dashboardMapaGeralPersistivel(geral.vitorias),
+        poles: dashboardMapaGeralPersistivel(geral.poles),
+        mvs: dashboardMapaGeralPersistivel(geral.mvs),
+        podios: dashboardMapaGeralPersistivel(geral.podios),
+        ultrapassagens: dashboardMapaGeralPersistivel(geral.ultrapassagens),
+        lideradas: dashboardMapaGeralPersistivel(geral.lideradas),
+        grand: dashboardMapaGeralPersistivel(geral.grand),
+        hat: dashboardMapaGeralPersistivel(geral.hat),
+        melhorLargada: geral.melhorLargada ? {
+            piloto: dashboardPilotoMetricaPersistivel(geral.melhorLargada.piloto),
+            ganho: Number(geral.melhorLargada.ganho || 0),
+            grid: Number(geral.melhorLargada.grid || 0),
+            posVolta1: Number(geral.melhorLargada.posVolta1 || 0),
+            etapa: {
+                docId: geral.melhorLargada.etapa?.docId || "",
+                meta: geral.melhorLargada.etapa?.meta || {}
+            }
+        } : null,
+        melhorVoltaAbsoluta: geral.melhorVoltaAbsoluta ? {
+            piloto: dashboardPilotoMetricaPersistivel(geral.melhorVoltaAbsoluta.piloto),
+            tempo: Number(geral.melhorVoltaAbsoluta.tempo || 0),
+            etapa: {
+                docId: geral.melhorVoltaAbsoluta.etapa?.docId || "",
+                meta: geral.melhorVoltaAbsoluta.etapa?.meta || {}
+            }
+        } : null,
+        topVitorias: geral.topVitorias || null,
+        topPoles: geral.topPoles || null,
+        topMvs: geral.topMvs || null,
+        topPodios: geral.topPodios || null,
+        topUltrapassagens: geral.topUltrapassagens || null,
+        topLideradas: geral.topLideradas || null,
+        topGrand: geral.topGrand || null,
+        topHat: geral.topHat || null,
+        topRegularidade: geral.topRegularidade ? {
+            piloto: dashboardPilotoMetricaPersistivel(geral.topRegularidade.piloto),
+            media: Number(geral.topRegularidade.media || 0),
+            valores: geral.topRegularidade.valores || []
+        } : null
+    });
+}
+
+function dashboardArrayParaMapa(arr) {
+    const mapa = new Map();
+    (Array.isArray(arr) ? arr : []).forEach(item => {
+        const key = dashboardPilotoKey(item.piloto);
+        if (key) mapa.set(key, item);
+    });
+    return mapa;
+}
+
+function dashboardHidratarGeral(resumo) {
+    if (!resumo?.versao) return null;
+    return {
+        ranking: Array.isArray(resumo.ranking) ? resumo.ranking : [],
+        vitorias: dashboardArrayParaMapa(resumo.vitorias),
+        poles: dashboardArrayParaMapa(resumo.poles),
+        mvs: dashboardArrayParaMapa(resumo.mvs),
+        podios: dashboardArrayParaMapa(resumo.podios),
+        ultrapassagens: dashboardArrayParaMapa(resumo.ultrapassagens),
+        lideradas: dashboardArrayParaMapa(resumo.lideradas),
+        grand: dashboardArrayParaMapa(resumo.grand),
+        hat: dashboardArrayParaMapa(resumo.hat),
+        melhorLargada: resumo.melhorLargada || null,
+        melhorVoltaAbsoluta: resumo.melhorVoltaAbsoluta || null,
+        topVitorias: resumo.topVitorias || null,
+        topPoles: resumo.topPoles || null,
+        topMvs: resumo.topMvs || null,
+        topPodios: resumo.topPodios || null,
+        topUltrapassagens: resumo.topUltrapassagens || null,
+        topLideradas: resumo.topLideradas || null,
+        topGrand: resumo.topGrand || null,
+        topHat: resumo.topHat || null,
+        topRegularidade: resumo.topRegularidade || null
+    };
+}
+
+async function dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVoltaAtual = "", nomeArquivoAtual = "", idImportacaoAtual = "") {
+    if (String(conteudoVoltaAtual || "").trim()) {
+        return {
+            voltas: extrairVoltaAVoltaHTMLTexto(conteudoVoltaAtual, nomeArquivoAtual || "volta_a_volta.html"),
+            fonte: { idImportacao: idImportacaoAtual || "", nomeArquivo: nomeArquivoAtual || "", origem: "importacao_atual" }
+        };
+    }
+
+    const snapshot = await campRef.collection("volta_a_volta").get();
+    const candidatos = snapshot.docs.map(doc => ({ id: doc.id, data: doc.data() || {} })).filter(doc => {
+        const etapaA = Number(doc.data.etapa || 0);
+        const etapaB = Number(meta.etapa || 0);
+        const dataA = String(doc.data.dataCorrida || "");
+        const dataB = String(meta.dataCorrida || "");
+        if (dataA && dataB && dataA !== dataB) return false;
+        if (etapaA && etapaB && etapaA !== etapaB) return false;
+        return (dataA && dataB) || (etapaA && etapaB);
+    }).sort((a, b) => String(b.data.dataUploadISO || b.data.atualizadoEmISO || b.data.criadoEmISO || "").localeCompare(String(a.data.dataUploadISO || a.data.atualizadoEmISO || a.data.criadoEmISO || "")));
+
+    for (const doc of candidatos) {
+        const conteudo = await dashboardConteudoVoltaDoc(doc);
+        if (!String(conteudo || "").trim()) continue;
+        return {
+            voltas: extrairVoltaAVoltaHTMLTexto(conteudo, doc.data.nomeArquivo || doc.id || "volta_a_volta.html"),
+            fonte: { idImportacao: doc.data.idImportacao || doc.id || "", nomeArquivo: doc.data.nomeArquivo || "", origem: "firestore" }
+        };
+    }
+
+    return { voltas: [], fonte: { idImportacao: "", nomeArquivo: "", origem: "ausente" } };
+}
+
+async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, conteudoVoltaAtual = "", nomeArquivoVoltaAtual = "", idImportacaoVoltaAtual = "", atualizarGeral = true }) {
+    const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
+    const resultadoDocId = getResultadoFinalDocId(etapa, dataCorrida);
+    const resultadoDocRef = campRef.collection("resultado_final").doc(resultadoDocId);
+    const [resultadoSnap, corridaSnap, classificacaoSnap] = await Promise.all([
+        resultadoDocRef.get(),
+        resultadoDocRef.collection("pilotos_resultado").get(),
+        resultadoDocRef.collection("classificacao").get()
+    ]);
+
+    const meta = {
+        ...(resultadoSnap.exists ? resultadoSnap.data() || {} : {}),
+        campeonato,
+        campeonato_id: campeonatoDocId,
+        etapa: Number(etapa),
+        dataCorrida,
+        resultadoDocId
+    };
+    const pilotosCampeonato = await buscarPilotosDoCampeonatoRankingFirestore(campeonato);
+    const corrida = corridaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
+        .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId, pilotosCampeonato));
+    const classificacao = classificacaoSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
+        .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId, pilotosCampeonato));
+    const voltaInfo = await dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVoltaAtual, nomeArquivoVoltaAtual, idImportacaoVoltaAtual);
+    const voltas = (voltaInfo.voltas || []).filter(item => linhaPertenceAoCampeonatoRanking(item, "", pilotosCampeonato));
+    const etapaObj = { docId: resultadoDocId, ref: resultadoDocRef, meta, corrida, classificacao, voltas };
+    const stat = dashboardEstatisticasEtapa(etapaObj);
+    const resumo = dashboardSerializarEstatisticasEtapa(stat, {
+        resultado_final: meta.resultadoFinalResumo?.idImportacao || "",
+        classificacao: meta.classificacaoResumo?.idImportacao || "",
+        volta_a_volta: voltaInfo.fonte
+    });
+
+    await resultadoDocRef.set(toFirestoreSafe({
+        campeonato,
+        campeonato_id: campeonatoDocId,
+        etapa: Number(etapa),
+        dataCorrida,
+        resultadoDocId,
+        dashboardResumo: resumo,
+        dashboardResumoVersao: DASHBOARD_RESUMO_VERSION,
+        dashboardResumoAtualizadoEmISO: resumo.atualizadoEmISO,
+        ultimoVoltaAVoltaImportado: voltaInfo.fonte?.idImportacao || meta.ultimoVoltaAVoltaImportado || "",
+        atualizadoEmISO: new Date().toISOString()
+    }), { merge: true });
+
+    if (atualizarGeral) await recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonato);
+    limparCacheDashboardCampeonato(campeonatoDocId);
+    return resumo;
+}
+
+async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonatoNome = "") {
+    const campRef = firestore.collection(COLLECTION_CAMPEONATOS).doc(campeonatoDocId);
+    const snapshot = await campRef.collection("resultado_final").get();
+    const stats = snapshot.docs
+        .map(doc => {
+            const meta = doc.data() || {};
+            const resumo = meta.dashboardResumo || null;
+            return resumo?.versao ? dashboardHidratarEstatisticasEtapa(meta, resumo, doc.id) : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => Number(a.etapa.meta.etapa || 0) - Number(b.etapa.meta.etapa || 0) || String(a.etapa.meta.dataCorrida || "").localeCompare(String(b.etapa.meta.dataCorrida || "")));
+
+    const ranking = dashboardRankingDasEtapasPersistidas(stats);
+    const geral = dashboardEstatisticasGeral({ etapasStats: stats }, ranking);
+    const resumoGeral = dashboardSerializarGeral(geral, ranking, stats);
+
+    await campRef.set(toFirestoreSafe({
+        nome: campeonatoNome || undefined,
+        dashboardGeral: resumoGeral,
+        dashboardGeralVersao: DASHBOARD_RESUMO_VERSION,
+        dashboardGeralAtualizadoEmISO: resumoGeral.atualizadoEmISO,
+        atualizadoEmISO: new Date().toISOString()
+    }), { merge: true });
+
+    limparCacheDashboardCampeonato(campeonatoDocId);
+    return resumoGeral;
+}
+
+async function recalcularEPersistirDashboardAposImportacao(args) {
+    try {
+        return await recalcularPersistirResumoEtapaDashboard(args);
+    } catch (e) {
+        console.error("Falha ao persistir resumo do dashboard:", e);
+        const status = document.getElementById("statusImport");
+        if (status) status.innerHTML += `<br>⚠️ Dados da importação foram salvos, mas o resumo do dashboard falhou: ${htmlEscape(e.message || e)}`;
+        return null;
+    }
+}
+
+async function reprocessarResumosDashboardCampeonatoAtual() {
+    if (!await pedirSenhaAdmin()) return;
+    const campeonato = document.getElementById("imp_camp")?.value || "";
+    const status = document.getElementById("statusImport");
+    if (!campeonato) return alert("Selecione o campeonato na tela de importação.");
+
+    try {
+        if (status) status.innerHTML = "⏳ Reprocessando resumos persistidos do campeonato...";
+        const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
+        const etapasSnap = await campRef.collection("resultado_final").get();
+        const etapas = etapasSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
+            .filter(item => item.etapa && item.dataCorrida)
+            .sort((a, b) => Number(a.etapa || 0) - Number(b.etapa || 0));
+
+        for (let i = 0; i < etapas.length; i += 1) {
+            const item = etapas[i];
+            if (status) status.innerHTML = `⏳ Reprocessando etapa ${htmlEscape(item.etapa)} (${i + 1}/${etapas.length})...`;
+            await recalcularPersistirResumoEtapaDashboard({
+                campeonato,
+                etapa: item.etapa,
+                dataCorrida: item.dataCorrida,
+                atualizarGeral: false
+            });
+        }
+
+        await recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonato);
+        if (status) status.innerHTML = `✅ Resumos persistidos atualizados: ${etapas.length} etapa(s). A tela inicial agora apenas consulta os resultados salvos.`;
+        await inicializarRankingFirestore();
+    } catch (e) {
+        console.error(e);
+        if (status) status.innerHTML = `❌ Erro ao reprocessar resumos: ${htmlEscape(e.message || e)}`;
+    }
+}
+window.reprocessarResumosDashboardCampeonatoAtual = reprocessarResumosDashboardCampeonatoAtual;
+
+/* V2: consulta apenas documentos de resumo. Não reabre HTML nem recalcula métricas ao exibir a home. */
+async function carregarDashboardCampeonato(campeonatoDocId, force = false) {
+    if (!force && DASHBOARD_CAMPEONATO_CACHE.has(campeonatoDocId)) return DASHBOARD_CAMPEONATO_CACHE.get(campeonatoDocId);
+
+    const campRef = firestore.collection(COLLECTION_CAMPEONATOS).doc(campeonatoDocId);
+    const [campSnap, resultadosSnapshot] = await Promise.all([
+        campRef.get(),
+        campRef.collection("resultado_final").get()
+    ]);
+    const campData = campSnap.exists ? campSnap.data() || {} : {};
+    const campeonatoNome = campData.nome || campData.nome_exibicao || campeonatoDocId;
+    const etapas = resultadosSnapshot.docs.map(doc => {
+        const meta = doc.data() || {};
+        return {
+            docId: doc.id,
+            meta,
+            resumoPersistido: meta.dashboardResumo || null,
+            stat: meta.dashboardResumo?.versao ? dashboardHidratarEstatisticasEtapa(meta, meta.dashboardResumo, doc.id) : null
+        };
+    }).sort((a, b) => Number(a.meta.etapa || 0) - Number(b.meta.etapa || 0) || String(a.meta.dataCorrida || "").localeCompare(String(b.meta.dataCorrida || "")));
+
+    const geralPersistido = dashboardHidratarGeral(campData.dashboardGeral || null);
+    const payload = {
+        campeonatoDocId,
+        campeonatoNome,
+        campData,
+        etapas,
+        etapasStats: etapas.map(e => e.stat).filter(Boolean),
+        rankingPersistido: geralPersistido?.ranking || [],
+        geralPersistido,
+        resumoPersistido: !!geralPersistido
+    };
+    DASHBOARD_CAMPEONATO_CACHE.set(campeonatoDocId, payload);
+    return payload;
+}
+
+async function renderDashboardCampeonato() {
+    const select = document.getElementById("filtro_rank_firebase_camp");
+    const etapaSelect = document.getElementById("filtro_rank_etapa");
+    const content = document.getElementById("rankingFirestoreContent");
+    const status = document.getElementById("rankingFirestoreStatus");
+    if (!select || !content) return;
+
+    const campId = select.value;
+    if (!campId) {
+        content.innerHTML = "";
+        if (status) status.innerHTML = "Selecione um campeonato para carregar os dados.";
+        return;
+    }
+
+    try {
+        if (status) status.innerHTML = "⏳ Consultando resumos salvos no Firestore...";
+        const payload = await carregarDashboardCampeonato(campId);
+        await carregarFiltroEtapasDashboard(campId, payload);
+        const filtroEtapa = etapaSelect?.value || "geral";
+        const ranking = payload.rankingPersistido || [];
+
+        if (filtroEtapa === "geral") {
+            const geral = payload.geralPersistido;
+            if (!geral) {
+                content.innerHTML = `<div class="form-card"><h3>Resumo ainda não processado</h3><p class="hint">Este campeonato possui dados antigos sem o resumo persistido. Na tela Importar, selecione o campeonato e use <strong>REPROCESSAR RESUMOS DO CAMPEONATO</strong>.</p></div>`;
+                if (status) status.innerHTML = "⚠️ Campeonato sem dashboardGeral persistido.";
+                return;
+            }
+            content.innerHTML = `
+                ${dashboardHero(payload, ranking)}
+                <div class="dashboard-section-title"><h3>⭐ Destaques do Campeonato</h3><span>dados pré-calculados e persistidos</span></div>
+                <div class="dashboard-cards">${dashboardCardsGeral(geral)}</div>
+                <div class="dashboard-section-title"><h3>🥇 Top 3 do Campeonato</h3><span>classificação por pontos</span></div>
+                ${dashboardPodium(ranking.slice(0, 3), true)}
+                ${dashboardTabelaGeral(ranking, geral)}
+                <div class="dashboard-note">A home apenas consulta os resumos salvos no Firestore. Os cálculos são refeitos e persistidos somente ao importar/reprocessar arquivos.</div>
+            `;
+            if (status) status.innerHTML = `✅ Resumo persistido carregado · ${payload.etapasStats.length} etapa(s) processada(s) · ${ranking.length} piloto(s).`;
+            return;
+        }
+
+        const etapa = payload.etapas.find(e => e.docId === filtroEtapa);
+        const stat = etapa?.stat || null;
+        if (!stat) {
+            content.innerHTML = `<div class="form-card"><h3>Etapa sem resumo persistido</h3><p class="hint">Reimporte um dos arquivos desta etapa ou use o botão de reprocessamento na tela Importar.</p></div>`;
+            if (status) status.innerHTML = "⚠️ Etapa encontrada, mas dashboardResumo ainda não foi gerado.";
+            return;
+        }
+
+        const faltantes = [];
+        if (!stat.completo?.resultado_final) faltantes.push("Resultado final");
+        if (!stat.completo?.classificacao) faltantes.push("Classificação");
+        if (!stat.completo?.volta_a_volta) faltantes.push("Volta a volta");
+        const aviso = faltantes.length ? `<div class="dashboard-note" style="margin-bottom:10px;">⏳ A etapa ainda está incompleta. Falta importar/processar: <strong>${htmlEscape(faltantes.join(", "))}</strong>. Os cards são atualizados automaticamente a cada arquivo salvo.</div>` : "";
+
+        content.innerHTML = `
+            ${dashboardHero(payload, ranking, stat)}
+            ${aviso}
+            <div class="dashboard-section-title"><h3>⭐ Destaques da Etapa</h3><span>dados pré-calculados e persistidos</span></div>
+            <div class="dashboard-cards">${dashboardCardsEtapa(stat)}</div>
+            <div class="dashboard-section-title"><h3>🥇 Pódio da Etapa</h3><span>resultado final</span></div>
+            ${dashboardPodium(stat.podium, false)}
+            ${dashboardTabelaEtapa(stat)}
+            <div class="dashboard-note">Esta tela não reprocessa os arquivos. As métricas foram calculadas no momento da importação e estão persistidas em resultado_final/${htmlEscape(etapa.docId)}/dashboardResumo.</div>
+        `;
+        if (status) status.innerHTML = `✅ Etapa ${htmlEscape(stat.etapa.meta.etapa || etapa.docId)} · resumo persistido carregado · ${stat.corrida.length} piloto(s).`;
+    } catch (e) {
+        console.error(e);
+        content.innerHTML = "";
+        if (status) status.innerHTML = `❌ Erro ao consultar o dashboard: ${htmlEscape(e.message || e)}`;
+    }
+}
 
 inicializarPreviewVoltaAVoltaJS();
 fetchData();
