@@ -3351,17 +3351,111 @@ async function excluirDadosVoltaAVoltaRelacionados({ key, item, campRef, resultR
     };
 }
 
+async function limparMetadadosDaImportacaoExcluida({ resultRef, tipoArquivo, key }) {
+    const snap = await resultRef.get();
+    if (!snap.exists) return;
+
+    const data = snap.data() || {};
+    const del = firestoreDeleteValue();
+    const payload = { atualizadoEmISO: new Date().toISOString() };
+
+    if (tipoArquivo === "resultado_final" && String(data?.resultadoFinalResumo?.idImportacao || "") === String(key || "")) {
+        payload.resultadoFinalResumo = del;
+    }
+
+    if (tipoArquivo === "classificacao" && String(data?.classificacaoResumo?.idImportacao || "") === String(key || "")) {
+        payload.classificacaoResumo = del;
+    }
+
+    // O fluxo específico do Volta a volta já remove estes campos quando o
+    // backup excluído é o que estava ativo. Este fallback cobre registros
+    // antigos que não passaram por aquela rotina.
+    if (tipoArquivo === "volta_a_volta" && importacaoVoltaAVoltaPertenceAoBackup(data, key)) {
+        Object.assign(payload, payloadLimpezaResumoVoltaAVolta());
+    }
+
+    if (String(data.ultimoIdImportacao || "") === String(key || "")) {
+        payload.ultimoIdImportacao = del;
+        payload.ultimoTipoArquivoImportado = del;
+    }
+
+    if (String(data.caminhoBackup || "").endsWith(`/${key}`)) {
+        payload.caminhoBackup = del;
+    }
+
+    await resultRef.set(payload, { merge: true });
+}
+
+async function dashboardEtapaPossuiFontePersistida({ campRef, resultRef, etapa, dataCorrida }) {
+    const [corridaSnap, classificacaoSnap, voltaPilotosSnap, voltaDocsSnap] = await Promise.all([
+        resultRef.collection("pilotos_resultado").limit(1).get(),
+        resultRef.collection("classificacao").limit(1).get(),
+        resultRef.collection("volta_a_volta_pilotos").limit(1).get(),
+        campRef.collection("volta_a_volta").get()
+    ]);
+
+    const etapaNumero = Number(etapa || 0);
+    const dataEtapa = String(dataCorrida || "");
+    const temVoltaRaw = voltaDocsSnap.docs.some(doc => {
+        const data = doc.data() || {};
+        const etapaDoc = Number(data.etapa || 0);
+        const dataDoc = String(data.dataCorrida || "");
+        if (etapaNumero && etapaDoc && etapaNumero !== etapaDoc) return false;
+        if (dataEtapa && dataDoc && dataEtapa !== dataDoc) return false;
+        return (etapaNumero && etapaDoc) || (dataEtapa && dataDoc);
+    });
+
+    return !corridaSnap.empty || !classificacaoSnap.empty || !voltaPilotosSnap.empty || temVoltaRaw;
+}
+
+async function atualizarDashboardAposExclusaoImportacao({ campeonato, etapa, dataCorrida, campRef, resultRef }) {
+    const possuiFonte = await dashboardEtapaPossuiFontePersistida({
+        campRef,
+        resultRef,
+        etapa,
+        dataCorrida
+    });
+
+    if (possuiFonte) {
+        await recalcularPersistirResumoEtapaDashboard({
+            campeonato,
+            etapa,
+            dataCorrida,
+            atualizarGeral: false
+        });
+    } else {
+        const del = firestoreDeleteValue();
+        await resultRef.set({
+            dashboardResumo: del,
+            dashboardResumoVersao: del,
+            dashboardResumoAtualizadoEmISO: del,
+            resultadoFinalResumo: del,
+            classificacaoResumo: del,
+            voltaAVoltaResumo: del,
+            ultimoVoltaAVoltaImportado: del,
+            dashboardOculto: true,
+            atualizadoEmISO: new Date().toISOString()
+        }, { merge: true });
+    }
+
+    await recalcularPersistirResumoGeralDashboard(campRef.id, campeonato);
+    limparCacheDashboardCampeonato(campRef.id);
+    return possuiFonte;
+}
+
 async function excluirImportacao(key) {
     if (!await pedirSenhaAdmin()) return;
-    if (!confirm("Excluir importação e todos os dados relacionados nas collections/subcollections?")) return;
+    if (!confirm("Excluir importação e todos os dados relacionados nas collections/subcollections? O dashboard da etapa será recalculado automaticamente.")) return;
 
     const doc = await firestore.collection(COLLECTION_BACKUPS).doc(key).get();
     if (!doc.exists) return alert("Importação não encontrada.");
 
     const item = doc.data() || {};
-    const campId = normalizarDocId(item.campeonato || "");
+    const campeonato = String(item.campeonato || "").trim();
+    const campId = normalizarDocId(campeonato);
     const dataCorrida = item.dataCorrida || extrairDataItem(item);
-    const resultadoDocId = getResultadoFinalDocId(item.etapa || "sem_etapa", dataCorrida);
+    const etapa = item.etapa || "sem_etapa";
+    const resultadoDocId = getResultadoFinalDocId(etapa, dataCorrida);
     const campRef = firestore.collection(COLLECTION_CAMPEONATOS).doc(campId);
     const resultRef = campRef.collection("resultado_final").doc(resultadoDocId);
     const tipoArquivo = String(item.tipoArquivo || item.tipo || "").trim();
@@ -3379,8 +3473,11 @@ async function excluirImportacao(key) {
             totalOps += infoVolta.totalOps;
         } else {
             const operacoes = [];
+            const subcollections = tipoArquivo === "classificacao"
+                ? ["classificacao"]
+                : (tipoArquivo === "resultado_final" ? ["pilotos_resultado"] : ["pilotos_resultado", "classificacao"]);
 
-            for (const sub of ["pilotos_resultado", "classificacao"]) {
+            for (const sub of subcollections) {
                 const snap = await resultRef.collection(sub).where("idImportacao", "==", key).get();
                 snap.forEach(d => operacoes.push({ tipo: "delete", ref: d.ref }));
             }
@@ -3388,9 +3485,31 @@ async function excluirImportacao(key) {
             totalOps += await executarBatchFirestore(operacoes);
         }
 
+        await limparMetadadosDaImportacaoExcluida({
+            resultRef,
+            tipoArquivo,
+            key
+        });
+
+        // O backup é removido somente depois dos dados derivados. Assim, se
+        // alguma etapa falhar, ainda existe fonte para recuperação manual.
         await firestore.collection(COLLECTION_BACKUPS).doc(key).delete();
 
-        alert(`Importação excluída com sucesso. ${totalOps} registro(s) relacionado(s) foram removidos/limpos.`);
+        const etapaAindaExiste = await atualizarDashboardAposExclusaoImportacao({
+            campeonato,
+            etapa,
+            dataCorrida,
+            campRef,
+            resultRef
+        });
+
+        alert(
+            `Importação excluída com sucesso. ${totalOps} registro(s) relacionado(s) foram removidos/limpos. ` +
+            (etapaAindaExiste
+                ? "O dashboard da etapa e o geral foram recalculados com os arquivos restantes."
+                : "Como não restaram arquivos da etapa, ela foi removida da visualização do dashboard e o geral foi recalculado.")
+        );
+
         await carregarHistorico();
         await inicializarRankingFirestore();
     } catch (e) {
@@ -3974,10 +4093,9 @@ function somarClassificacaoRankingFirestore(rankingMap, item, etapaInfo) {
 async function buscarPilotosDoCampeonatoRankingFirestore(campeonato) {
     const ids = new Set();
     const nomes = new Set();
-
-    DB.pilotos
+    const pilotos = (Array.isArray(DB.pilotos) ? DB.pilotos : [])
         .filter(p => pilotoPertenceAoCampeonato(p, campeonato))
-        .forEach(p => {
+        .map(p => {
             const driverId = String(p.driver_id || p.id_piloto || p.id || "").trim();
             const nome = String(p.driver_name || p.nome || "").trim();
 
@@ -3992,9 +4110,19 @@ async function buscarPilotosDoCampeonatoRankingFirestore(campeonato) {
                 nomes.add(normalizarDocId(nome));
                 nomes.add(normalizarChave(nome));
             }
+
+            // Mantém uma representação canônica utilizável para cruzar os
+            // dados do Volta a volta com os cadastros reais do campeonato.
+            return {
+                ...p,
+                driver_id: driverId,
+                id_piloto: driverId,
+                driver_name: nome,
+                nome: nome || p.nome || p.driver_name || ""
+            };
         });
 
-    return { ids, nomes };
+    return { ids, nomes, pilotos };
 }
 
 function linhaPertenceAoCampeonatoRanking(item, docId, pilotosCampeonato) {
@@ -4862,7 +4990,20 @@ function dashboardOrdenarResultado(rows) {
 }
 
 function dashboardCanonicalizarVoltasEtapa(voltas, corrida, classificacao, pilotosCampeonato = [], vinculosVolta = []) {
-    const candidatos = [...(corrida || []), ...(classificacao || []), ...(vinculosVolta || []), ...(pilotosCampeonato || [])];
+    // buscarPilotosDoCampeonatoRankingFirestore retorna um objeto com Sets
+    // (ids/nomes) e, a partir da V4, também a lista canônica de pilotos.
+    // Não podemos fazer spread diretamente no objeto, pois isso gera
+    // "(pilotosCampeonato || []) is not iterable" durante o reprocessamento.
+    const pilotosLista = Array.isArray(pilotosCampeonato)
+        ? pilotosCampeonato
+        : (Array.isArray(pilotosCampeonato?.pilotos) ? pilotosCampeonato.pilotos : []);
+
+    const candidatos = [
+        ...(corrida || []),
+        ...(classificacao || []),
+        ...(vinculosVolta || []),
+        ...pilotosLista
+    ];
     const porId = new Map();
     const porNome = new Map();
     const porKartLista = new Map();
@@ -6067,6 +6208,7 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         dashboardResumo: resumo,
         dashboardResumoVersao: DASHBOARD_RESUMO_VERSION,
         dashboardResumoAtualizadoEmISO: resumo.atualizadoEmISO,
+        dashboardOculto: false,
         ultimoVoltaAVoltaImportado: voltaInfo.fonte?.idImportacao || meta.ultimoVoltaAVoltaImportado || "",
         atualizadoEmISO: new Date().toISOString()
     }), { merge: true });
@@ -6133,9 +6275,20 @@ async function limparCadastrosDuplicadosCriadosPorVoltaAVolta(campeonato) {
         const nomeCanonico = normalizarNomeComparacao(parsed.driver_name);
         const candidatos = docs.filter(outro => {
             if (outro.id === item.id) return false;
-            const nomeOutro = normalizarNomeComparacao(outro.data.nome || outro.data.driver_name || "");
-            const idOutro = String(outro.data.id_piloto || outro.data.driver_id || (/^\d+$/.test(outro.id) ? outro.id : "")).trim();
-            return nomeOutro === nomeCanonico && !!idOutro;
+            const nomeBrutoOutro = String(outro.data.nome || outro.data.driver_name || "").trim();
+            const nomeOutro = normalizarNomeComparacao(nomeBrutoOutro);
+            if (nomeOutro !== nomeCanonico) return false;
+
+            // O cadastro canônico não precisa obrigatoriamente ter driver_id.
+            // Em alguns kartódromos o arquivo não fornece ID algum. O que
+            // diferencia o cadastro real do duplicado antigo é o nome normal,
+            // sem o prefixo "kart -" e sem o sufixo "- RENTAL".
+            const parsedOutro = extrairPilotoHeaderVoltaAVolta(nomeBrutoOutro);
+            const outroPareceHeader = !!parsedOutro.kart_numero &&
+                !!parsedOutro.driver_name &&
+                normalizarNomeComparacao(parsedOutro.driver_name) !== nomeOutro;
+
+            return !outroPareceHeader;
         });
 
         if (candidatos.length !== 1) continue;
@@ -6168,19 +6321,45 @@ async function reprocessarResumosDashboardCampeonatoAtual() {
             .filter(item => item.etapa && item.dataCorrida)
             .sort((a, b) => Number(a.etapa || 0) - Number(b.etapa || 0));
 
+        let etapasReprocessadas = 0;
+        let etapasOcultadas = 0;
+
         for (let i = 0; i < etapas.length; i += 1) {
             const item = etapas[i];
             if (status) status.innerHTML = `⏳ Reprocessando etapa ${htmlEscape(item.etapa)} (${i + 1}/${etapas.length})...`;
+
+            const resultRef = campRef.collection("resultado_final").doc(item.docId);
+            const possuiFonte = await dashboardEtapaPossuiFontePersistida({
+                campRef,
+                resultRef,
+                etapa: item.etapa,
+                dataCorrida: item.dataCorrida
+            });
+
+            if (!possuiFonte) {
+                const del = firestoreDeleteValue();
+                await resultRef.set({
+                    dashboardResumo: del,
+                    dashboardResumoVersao: del,
+                    dashboardResumoAtualizadoEmISO: del,
+                    dashboardOculto: true,
+                    atualizadoEmISO: new Date().toISOString()
+                }, { merge: true });
+                etapasOcultadas += 1;
+                continue;
+            }
+
             await recalcularPersistirResumoEtapaDashboard({
                 campeonato,
                 etapa: item.etapa,
                 dataCorrida: item.dataCorrida,
                 atualizarGeral: false
             });
+            etapasReprocessadas += 1;
         }
 
         await recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonato);
-        if (status) status.innerHTML = `✅ Resumos persistidos atualizados: ${etapas.length} etapa(s). ${duplicadosRemovidos ? `${duplicadosRemovidos} cadastro(s) duplicado(s) antigo(s) do Volta a volta foram removidos. ` : ""}A tela inicial agora apenas consulta os resultados salvos.`;
+        if (status) status.innerHTML = `✅ Resumos persistidos atualizados: ${etapasReprocessadas} etapa(s). ${etapasOcultadas ? `${etapasOcultadas} etapa(s) sem arquivos foram ocultadas. ` : ""}${duplicadosRemovidos ? `${duplicadosRemovidos} cadastro(s) duplicado(s) antigo(s) do Volta a volta foram removidos. ` : ""}A tela inicial agora apenas consulta os resultados salvos.`;
         await inicializarRankingFirestore();
     } catch (e) {
         console.error(e);
@@ -6189,7 +6368,7 @@ async function reprocessarResumosDashboardCampeonatoAtual() {
 }
 window.reprocessarResumosDashboardCampeonatoAtual = reprocessarResumosDashboardCampeonatoAtual;
 
-/* V3: consulta apenas documentos de resumo. Corrige vínculo do Volta a volta e melhor largada. */
+/* V4: consulta apenas resumos persistidos; exclusão também recalcula dashboard e etapas vazias ficam ocultas. */
 async function carregarDashboardCampeonato(campeonatoDocId, force = false) {
     if (!force && DASHBOARD_CAMPEONATO_CACHE.has(campeonatoDocId)) return DASHBOARD_CAMPEONATO_CACHE.get(campeonatoDocId);
 
@@ -6200,15 +6379,18 @@ async function carregarDashboardCampeonato(campeonatoDocId, force = false) {
     ]);
     const campData = campSnap.exists ? campSnap.data() || {} : {};
     const campeonatoNome = campData.nome || campData.nome_exibicao || campeonatoDocId;
-    const etapas = resultadosSnapshot.docs.map(doc => {
-        const meta = doc.data() || {};
-        return {
-            docId: doc.id,
-            meta,
-            resumoPersistido: meta.dashboardResumo || null,
-            stat: meta.dashboardResumo?.versao ? dashboardHidratarEstatisticasEtapa(meta, meta.dashboardResumo, doc.id) : null
-        };
-    }).sort((a, b) => Number(a.meta.etapa || 0) - Number(b.meta.etapa || 0) || String(a.meta.dataCorrida || "").localeCompare(String(b.meta.dataCorrida || "")));
+    const etapas = resultadosSnapshot.docs
+        .map(doc => {
+            const meta = doc.data() || {};
+            return {
+                docId: doc.id,
+                meta,
+                resumoPersistido: meta.dashboardResumo || null,
+                stat: meta.dashboardResumo?.versao ? dashboardHidratarEstatisticasEtapa(meta, meta.dashboardResumo, doc.id) : null
+            };
+        })
+        .filter(item => item.meta.dashboardOculto !== true)
+        .sort((a, b) => Number(a.meta.etapa || 0) - Number(b.meta.etapa || 0) || String(a.meta.dataCorrida || "").localeCompare(String(b.meta.dataCorrida || "")));
 
     const geralPersistido = dashboardHidratarGeral(campData.dashboardGeral || null);
     const payload = {
