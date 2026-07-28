@@ -4,12 +4,13 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 1;
+    const VERSION = 2;
     const num = value => {
         const n = Number(value);
         return Number.isFinite(n) ? n : null;
     };
-    const key = item => String(item.driver_id || item.id_piloto || item.driver_name || "").trim();
+    const normalizeDriverId = value => value === undefined || value === null ? "" : String(value).trim();
+    const key = item => normalizeDriverId(item.driver_id || item.id_piloto) || String(item.driver_name || "").trim();
     const mean = values => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
     const stddev = values => {
         const avg = mean(values);
@@ -43,7 +44,7 @@
         return { items, gridPace };
     }
     function gerarSnapshots(voltas, idsCampeonato) {
-        const oficiais = new Set((idsCampeonato || []).map(String));
+        const oficiais = new Set((idsCampeonato || []).map(normalizeDriverId).filter(Boolean));
         const grupos = new Map();
         (voltas || []).forEach(lap => {
             const id = key(lap);

@@ -263,8 +263,35 @@ function vinculosPiloto(p) {
         .filter(Boolean);
 }
 
+function normalizarDriverId(driverId) {
+    if (driverId === undefined || driverId === null) return "";
+    return String(driverId).trim();
+}
+
 function pilotosDoCampeonato(campeonato) {
     return DB.pilotos.filter(p => pilotoPertenceAoCampeonato(p, campeonato));
+}
+
+// Fonte única da identidade oficial. O vínculo vem sempre do cadastro global do
+// piloto; nomes são mantidos apenas para arquivos legados sem driver_id.
+function getChampionshipDrivers(campeonato) {
+    const pilotos = pilotosDoCampeonato(campeonato).map(p => {
+        const driverId = normalizarDriverId(p.driver_id || p.id_piloto || p.id);
+        const nome = String(p.driver_name || p.nome || "").trim();
+        return { ...p, driver_id: driverId, id_piloto: driverId, driver_name: nome, nome };
+    });
+    return {
+        pilotos,
+        ids: new Set(pilotos.map(p => p.driver_id).filter(Boolean)),
+        nomesLegados: new Set(pilotos.map(p => normalizarNomeComparacao(p.driver_name)).filter(Boolean))
+    };
+}
+
+function isChampionshipDriver(item, campeonatoDrivers) {
+    const driverId = normalizarDriverId(item?.driver_id || item?.id_piloto);
+    if (driverId) return campeonatoDrivers?.ids?.has(driverId) || false;
+    const nome = normalizarNomeComparacao(item?.driver_name || item?.nome || item?.piloto || "");
+    return !!nome && (campeonatoDrivers?.nomesLegados?.has(nome) || false);
 }
 
 function getTipoArquivoSelecionado() {
@@ -4122,38 +4149,22 @@ function somarClassificacaoRankingFirestore(rankingMap, item, etapaInfo) {
 }
 
 async function buscarPilotosDoCampeonatoRankingFirestore(campeonato) {
-    const ids = new Set();
+    const oficiais = getChampionshipDrivers(campeonato);
+    // aliases são preservados para os documentos antigos usados pelo ranking.
+    const ids = new Set(oficiais.ids);
     const nomes = new Set();
-    const pilotos = (Array.isArray(DB.pilotos) ? DB.pilotos : [])
-        .filter(p => pilotoPertenceAoCampeonato(p, campeonato))
-        .map(p => {
-            const driverId = String(p.driver_id || p.id_piloto || p.id || "").trim();
-            const nome = String(p.driver_name || p.nome || "").trim();
-
-            if (driverId) {
-                ids.add(driverId);
-                ids.add(normalizarDocId(driverId));
-                ids.add(normalizarChave(driverId));
-            }
-
-            if (nome) {
-                nomes.add(normalizarNomeComparacao(nome));
-                nomes.add(normalizarDocId(nome));
-                nomes.add(normalizarChave(nome));
-            }
-
-            // Mantém uma representação canônica utilizável para cruzar os
-            // dados do Volta a volta com os cadastros reais do campeonato.
-            return {
-                ...p,
-                driver_id: driverId,
-                id_piloto: driverId,
-                driver_name: nome,
-                nome: nome || p.nome || p.driver_name || ""
-            };
-        });
-
-    return { ids, nomes, pilotos };
+    oficiais.pilotos.forEach(p => {
+        if (p.driver_id) {
+            ids.add(normalizarDocId(p.driver_id));
+            ids.add(normalizarChave(p.driver_id));
+        }
+        if (p.driver_name) {
+            nomes.add(normalizarNomeComparacao(p.driver_name));
+            nomes.add(normalizarDocId(p.driver_name));
+            nomes.add(normalizarChave(p.driver_name));
+        }
+    });
+    return { ...oficiais, ids, nomes };
 }
 
 function linhaPertenceAoCampeonatoRanking(item, docId, pilotosCampeonato) {
@@ -4162,22 +4173,18 @@ function linhaPertenceAoCampeonatoRanking(item, docId, pilotosCampeonato) {
 
     if (!ids.size && !nomes.size) return true;
 
-    const driverId = String(item?.driver_id || item?.id_piloto || docId || "").trim();
+    const driverId = normalizarDriverId(item?.driver_id || item?.id_piloto);
     const driverName = String(item?.driver_name || item?.nome || item?.piloto || "").trim();
 
-    return (driverId && (
-        ids.has(driverId) ||
-        ids.has(normalizarDocId(driverId)) ||
-        ids.has(normalizarChave(driverId))
-    )) || (docId && (
-        ids.has(docId) ||
-        ids.has(normalizarDocId(docId)) ||
-        ids.has(normalizarChave(docId))
-    )) || (driverName && (
+    if (driverId) {
+        return ids.has(driverId) || ids.has(normalizarDocId(driverId)) || ids.has(normalizarChave(driverId));
+    }
+    if (docId && (ids.has(docId) || ids.has(normalizarDocId(docId)) || ids.has(normalizarChave(docId)))) return true;
+    return !!driverName && (
         nomes.has(normalizarNomeComparacao(driverName)) ||
         nomes.has(normalizarDocId(driverName)) ||
         nomes.has(normalizarChave(driverName))
-    ));
+    );
 }
 
 function extrairLinhasResumoRankingFirestore(etapaInfo, campos) {
@@ -5665,13 +5672,13 @@ function dashboardTabelaGeral(ranking, geral) {
             <div class="dashboard-section-title" style="margin-top:0;"><h3>🏆 Classificação do Campeonato</h3><span>${ranking.length} piloto(s)</span></div>
             <div class="dashboard-table-wrap">
                 <table class="dashboard-table">
-                    <tr><th>Pos</th><th>Piloto</th><th>Pts</th><th>Vit</th><th>Pódios</th><th>Poles</th><th>MV</th></tr>
+                    <tr><th class="dashboard-sticky-identity">Pos&nbsp;&nbsp;Piloto</th><th>Nome</th><th>Pts</th><th>Vit</th><th>Pódios</th><th>Poles</th><th>MV</th></tr>
                     ${ranking.map((p, idx) => {
                         const key = dashboardPilotoKey(p);
                         const medalha = ["🥇", "🥈", "🥉"][idx] || "";
                         return `<tr class="${idx < 3 ? `stage-result-top stage-result-top-${idx + 1}` : ""}">
-                            <td><strong>${medalha} ${idx + 1}º</strong></td>
-                            <td><div class="dashboard-driver-cell">${dashboardMiniAvatar(p)}<strong>${htmlEscape(dashboardNomePiloto(p))}</strong></div></td>
+                            <td class="dashboard-sticky-identity"><div class="dashboard-identity-cell"><strong>${medalha} ${idx + 1}º</strong>${dashboardMiniAvatar(p)}</div></td>
+                            <td><strong>${htmlEscape(dashboardNomePiloto(p))}</strong></td>
                             <td><strong>${Number(p.pontos_total || 0)}</strong></td>
                             <td>${geral.vitorias.get(key)?.total || 0}</td>
                             <td>${geral.podios.get(key)?.total || 0}</td>
@@ -5692,14 +5699,14 @@ function dashboardTabelaEtapa(stat) {
             <div class="dashboard-section-title" style="margin-top:0;"><h3>🏁 Resultado da Etapa</h3><span>${stat.corrida.length} piloto(s)</span></div>
             <div class="dashboard-table-wrap">
                 <table class="dashboard-table">
-                    <tr><th>Pos</th><th>Piloto</th><th>Grid</th><th>Kart</th><th>Voltas</th><th>Melhor Volta</th><th>Total</th><th>Pts</th></tr>
+                    <tr><th class="dashboard-sticky-identity">Pos&nbsp;&nbsp;Piloto</th><th>Nome</th><th>Grid</th><th>Kart</th><th>Voltas</th><th>Melhor Volta</th><th>Total</th><th>Pts</th></tr>
                     ${stat.corrida.map((p, idx) => {
                         const grid = classMap.get(dashboardPilotoKey(p))?.pos || "-";
                         const pts = Number(p.pontos || 0) + Number(p.melhor_tempo_ponto || 0);
                         const medalha = ["🥇", "🥈", "🥉"][idx] || "";
                         return `<tr class="${idx < 3 ? `stage-result-top stage-result-top-${idx + 1}` : ""}">
-                            <td><strong>${medalha} ${idx + 1}º</strong></td>
-                            <td><div class="dashboard-driver-cell">${dashboardMiniAvatar(p)}<strong>${htmlEscape(dashboardNomePiloto(p))}</strong></div></td>
+                            <td class="dashboard-sticky-identity"><div class="dashboard-identity-cell"><strong>${medalha} ${idx + 1}º</strong>${dashboardMiniAvatar(p)}</div></td>
+                            <td><strong>${htmlEscape(dashboardNomePiloto(p))}</strong></td>
                             <td>${grid}</td>
                             <td>${htmlEscape(p.kart_numero || "-")}</td>
                             <td>${htmlEscape(p.voltas ?? "-")}</td>
@@ -5715,10 +5722,10 @@ function dashboardTabelaEtapa(stat) {
             <div class="dashboard-section-title" style="margin-top:0;"><h3>⏱️ Classificação / Tomada</h3><span>${stat.classificacao.length} piloto(s)</span></div>
             <div class="dashboard-table-wrap">
                 <table class="dashboard-table">
-                    <tr><th>Pos</th><th>Piloto</th><th>Kart</th><th>Melhor Volta</th><th>Voltas</th><th>Bônus</th></tr>
+                    <tr><th class="dashboard-sticky-identity">Pos&nbsp;&nbsp;Piloto</th><th>Nome</th><th>Kart</th><th>Melhor Volta</th><th>Voltas</th><th>Bônus</th></tr>
                     ${stat.classificacao.map((p, idx) => `<tr>
-                        <td><strong>${idx + 1}º</strong></td>
-                        <td><div class="dashboard-driver-cell">${dashboardMiniAvatar(p)}<strong>${htmlEscape(dashboardNomePiloto(p))}</strong></div></td>
+                        <td class="dashboard-sticky-identity"><div class="dashboard-identity-cell"><strong>${idx + 1}º</strong>${dashboardMiniAvatar(p)}</div></td>
+                        <td><strong>${htmlEscape(dashboardNomePiloto(p))}</strong></td>
                         <td>${htmlEscape(p.kart_numero || "-")}</td>
                         <td>${htmlEscape(p.melhor_tempo || "-")}</td>
                         <td>${htmlEscape(p.voltas ?? "-")}</td>
@@ -6282,12 +6289,12 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         return null;
     }
     const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
-    const idsOficiais = pilotosLista.map(p => String(p.driver_id || p.id_piloto || p.id || "")).filter(Boolean);
+    const idsOficiais = pilotosLista.map(p => normalizarDriverId(p.driver_id || p.id_piloto || p.id)).filter(Boolean);
     const analytics = KartAnalytics.processarVoltasEtapa(voltas, idsOficiais);
     const participantes = new Map();
     voltas.forEach(v => {
         const id = String(v.driver_id || normalizarNomeComparacao(v.driver_name));
-        if (!participantes.has(id)) participantes.set(id, { driver_id: String(v.driver_id || ""), driver_name: v.driver_name || id, kart_numero: v.kart_numero || "", isChampionship: idsOficiais.includes(String(v.driver_id || "")) });
+        if (!participantes.has(id)) participantes.set(id, { driver_id: String(v.driver_id || ""), driver_name: v.driver_name || id, kart_numero: v.kart_numero || "", isChampionship: idsOficiais.includes(normalizarDriverId(v.driver_id)) });
     });
     await analyticsRef.set(toFirestoreSafe({ ...analytics, available: true, fonte: fonte || {}, processedAt: new Date().toISOString() }));
     const ops = [];
@@ -6304,8 +6311,30 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
 }
 
 async function carregarAnalyticsEtapa(resultadoDocRef) {
-    const snap = await resultadoDocRef.collection("analytics").doc("volta_a_volta_v1").get();
-    return snap.exists ? snap.data() : null;
+    const [snap, campSnap] = await Promise.all([
+        resultadoDocRef.collection("analytics").doc("volta_a_volta_v1").get(),
+        resultadoDocRef.parent.parent.get()
+    ]);
+    if (!snap.exists) return null;
+    const data = snap.data() || {};
+    const campData = campSnap.exists ? campSnap.data() || {} : {};
+    const oficiais = getChampionshipDrivers(campData.nome || campData.nome_exibicao || resultadoDocRef.parent.parent.id);
+    const snapshots = (data.snapshots || []).map(snapshot => ({
+        ...snapshot,
+        positions: (snapshot.positions || []).map(p => ({
+            ...p,
+            driver_id: normalizarDriverId(p.driver_id || p.id_piloto),
+            isChampionship: isChampionshipDriver(p, oficiais)
+        }))
+    }));
+    return {
+        ...data,
+        snapshots,
+        championshipDriverIds: [...oficiais.ids],
+        championshipDriverNames: [...oficiais.nomesLegados],
+        ultrapassagensCampeonato: KartAnalytics.calcularUltrapassagens(snapshots, true),
+        ultrapassagensGeral: data.ultrapassagensGeral || KartAnalytics.calcularUltrapassagens(snapshots, false)
+    };
 }
 
 async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonatoNome = "") {
@@ -6603,8 +6632,13 @@ async function renderAnalyticsEtapa(resultadoDocRef) {
 }
 function renderRegularidadeChart() {
     const alvo = document.getElementById("regularidadeChart");
-    const oficiais = new Set((ETAPA_ANALYTICS_ATUAL?.snapshots || []).flatMap(s => s.positions || []).filter(p => p.isChampionship).map(p => String(p.driver_id)));
-    const items = (ETAPA_ANALYTICS_ATUAL?.regularidade || []).filter(i => oficiais.has(String(i.driver_id)) && Number.isFinite(Number(i.regularidade))).sort((a,b) => a.regularidade-b.regularidade);
+    const oficiais = new Set((ETAPA_ANALYTICS_ATUAL?.championshipDriverIds || []).map(normalizarDriverId));
+    const nomesLegados = new Set(ETAPA_ANALYTICS_ATUAL?.championshipDriverNames || []);
+    const items = (ETAPA_ANALYTICS_ATUAL?.regularidade || []).filter(i => {
+        const driverId = normalizarDriverId(i.driver_id || i.id_piloto);
+        const oficial = driverId ? oficiais.has(driverId) : nomesLegados.has(normalizarNomeComparacao(i.driver_name || i.nome || ""));
+        return oficial && Number.isFinite(Number(i.regularidade));
+    }).sort((a,b) => a.regularidade-b.regularidade);
     if (!alvo) return;
     if (!items.length) { alvo.innerHTML = `<div class="analytics-state">Sem voltas limpas suficientes para os pilotos do campeonato.</div>`; return; }
     const valores = items.map(i => Number(i.regularidade)).sort((a,b)=>a-b);
@@ -6631,7 +6665,7 @@ function renderRaceSnapshot() {
     RACE_SNAPSHOT_INDEX=Math.max(0,Math.min(RACE_SNAPSHOT_INDEX,snaps.length-1)); const snap=snaps[RACE_SNAPSHOT_INDEX]; label.textContent=`VOLTA ${snap.numeroVolta} / ${snaps[snaps.length-1].numeroVolta}`;
     document.getElementById("raceChamp")?.classList.toggle("selected", RACE_MODE === "campeonato"); document.getElementById("raceAll")?.classList.toggle("selected", RACE_MODE === "geral");
     const positions=(snap.positions||[]).filter(p=>RACE_MODE==='geral'||p.isChampionship);
-    alvo.innerHTML=`<div class="race-table">${positions.map(p=>{const champ=RACE_MODE==='campeonato', pos=champ?p.positionChampionship:p.positionOverall, delta=champ?p.positionDeltaChampionship:p.positionDeltaOverall, laps=champ?p.lapsBehindPreviousChampionship:p.lapsBehindPreviousOverall, gapValue=champ?p.gapToPreviousChampionship:p.gapToPreviousOverall; const gap=pos===1?'Líder':laps?`+${laps} volta(s)`: `+${Number(gapValue||0).toFixed(3)}s`; const tooltip=`${getDriverFullDisplayName(p)} | Kart: ${p.kart_numero||'-'} | Posição: P${pos} | Gap: ${gap}`; return `<div class="race-row" title="${htmlEscape(tooltip)}"><b class="race-position">P${pos}</b><span class="race-track-cell"><i class="race-track" style="width:${Math.max(12,100-pos*7)}%"></i></span><span class="race-driver"><strong>${htmlEscape(getDriverShortName(p))}</strong><small>${gap}</small></span><em class="${delta>0?'gain':delta<0?'loss':''}">${RACE_SNAPSHOT_INDEX===0?'Largada':delta>0?`▲ +${delta}`:delta<0?`▼ ${delta}`:'= 0'}</em></div>`;}).join('')}</div>`;
+    alvo.innerHTML=`<div class="race-table">${positions.map(p=>{const pos=p.positionOverall, delta=p.positionDeltaOverall, laps=p.lapsBehindPreviousOverall, gapValue=p.gapToPreviousOverall; const gap=pos===1?'Líder':laps?`+${laps} volta(s)`: `+${Number(gapValue||0).toFixed(3)}s`; const tooltip=`${getDriverFullDisplayName(p)} | Kart: ${p.kart_numero||'-'} | Posição: P${pos} | Gap: ${gap}`; return `<div class="race-row" title="${htmlEscape(tooltip)}"><b class="race-position">P${pos}</b><span class="race-track-cell"><i class="race-track" style="width:${Math.max(12,100-pos*7)}%"></i></span><span class="race-driver"><strong>${htmlEscape(getDriverShortName(p))}</strong><small>${gap}</small></span><em class="${delta>0?'gain':delta<0?'loss':''}">${RACE_SNAPSHOT_INDEX===0?'Largada':delta>0?`▲ +${delta}`:delta<0?`▼ ${delta}`:'= 0'}</em></div>`;}).join('')}</div>`;
 }
 function proximaVolta(){const n=ETAPA_ANALYTICS_ATUAL?.snapshots?.length||0;if(n){RACE_SNAPSHOT_INDEX=Math.min(n-1,RACE_SNAPSHOT_INDEX+1);renderRaceSnapshot();}}
 function voltaAnterior(){RACE_SNAPSHOT_INDEX=Math.max(0,RACE_SNAPSHOT_INDEX-1);renderRaceSnapshot();}

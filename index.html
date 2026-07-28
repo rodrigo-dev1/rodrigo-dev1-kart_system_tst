@@ -123,6 +123,11 @@
         .dashboard-table tr.stage-result-top td { font-size:13px; background:rgba(255,202,92,.07); border-bottom-color:#66552d; }
         .dashboard-table tr.stage-result-top-1 td { background:rgba(255,202,92,.13); border-bottom-color:#a88734; }
         .dashboard-driver-cell { display:flex; align-items:center; gap:8px; min-width:180px; }
+        .dashboard-table .dashboard-sticky-identity { position:sticky; left:0; z-index:3; min-width:108px; width:108px; background:#171c24; box-shadow:5px 0 8px -7px rgba(0,0,0,.9); }
+        .dashboard-table th.dashboard-sticky-identity { z-index:4; background:#222833; }
+        .dashboard-table tr.stage-result-top td.dashboard-sticky-identity { background:#252725; }
+        .dashboard-table tr.stage-result-top-1 td.dashboard-sticky-identity { background:#302d25; }
+        .dashboard-identity-cell { display:flex; align-items:center; justify-content:space-between; gap:7px; white-space:nowrap; }
         .dashboard-mini-avatar { width:30px; height:30px; flex:0 0 30px; border-radius:50%; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#303744; font-size:10px; font-weight:800; }
         .dashboard-mini-avatar img { width:100%; height:100%; object-fit:cover; }
         .dashboard-note { color:#7f8998; font-size:10px; margin-top:8px; line-height:1.4; }
@@ -142,6 +147,8 @@
             .dashboard-card-desc { font-size:10px; }
             .podium-grid { grid-template-columns:1fr; }
             .champ-hero-main, .champ-hero-side { padding:14px; }
+            .dashboard-table .dashboard-sticky-identity { min-width:96px; width:96px; padding-inline:6px; }
+            .dashboard-identity-cell { gap:5px; }
         }
         @media (max-width: 430px) {
             .dashboard-cards { grid-template-columns:1fr; }
