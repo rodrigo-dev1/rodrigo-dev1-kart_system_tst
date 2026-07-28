@@ -60,7 +60,7 @@ test("analytics preserva corrida completa e oficiais sem metrica ou ultrapassage
     const laps = [{ driver_id: "1", driver_name: "OFICIAL COM VOLTA", isChampionship: true, volta: 1, volta_lider: 1, elapsed_time: 2, tempo_volta_segundos: 60 }, { driver_id: "9", driver_name: "EXTERNO", isChampionship: false, volta: 1, volta_lider: 1, elapsed_time: 1, tempo_volta_segundos: 59 }];
     const result = analytics.processarVoltasEtapa(laps, official);
     assert.deepEqual(result.snapshots[0].positions.map(p => p.positionOverall), [1, 2]);
-    assert.equal(result.regularidade.find(p => p.driver_id === "2").status, "insufficient_data");
+    assert.equal(result.regularidade.find(p => p.driver_id === "2").status, "voltas_insuficientes");
     assert.deepEqual(result.ultrapassagensCampeonato.map(p => p.driver_id).sort(), ["1", "2"]);
 });
 
@@ -109,4 +109,40 @@ test("reconciliacao mantem exatamente todos os pilotos do resultado", () => {
     assert.deepEqual(identity.compareDriverIdSets(resultado, reconciliados), {
         expectedCount: 2, actualCount: 2, expected: ["1", "2"], actual: ["1", "2"], missing: [], extra: []
     });
+});
+
+test("filtro da evolucao remove externos e reconstroi posicoes relativas", () => {
+    const snapshot = { positions: ["A", "X", "B", "Y", "C"].map((driver_id, index) => ({ driver_id, positionOverall: index + 1 })) };
+    const geral = analytics.filtrarSnapshot(snapshot, new Set(["A", "B", "C"]), "geral");
+    const campeonato = analytics.filtrarSnapshot(snapshot, new Set(["A", "B", "C"]), "campeonato");
+    assert.deepEqual(geral.map(p => p.driver_id), ["A", "X", "B", "Y", "C"]);
+    assert.deepEqual(campeonato.map(p => p.driver_id), ["A", "B", "C"]);
+    assert.deepEqual(campeonato.map(p => p.positionChampionship), [1, 2, 3]);
+});
+
+test("regularidade ignora volta 1 e joker extremamente rapido", () => {
+    const times = [54.930, 50.276, 50.803, 49.518, 48.976, 49.152, 31.314, 49.483];
+    const result = analytics.calcularRegularidade(times.map((tempo_volta_segundos, index) => ({
+        driver_id: "A", driver_name: "PILOTO A", volta: index + 1, tempo_volta_segundos
+    }))).items[0];
+    assert.equal(result.status, "ok");
+    assert.equal(result.bestLapValid, 48.976);
+    assert.equal(result.laps.find(l => l.volta === 7).classification, "joker_lap");
+    assert.equal(result.laps.find(l => l.volta === 7).validForRegularity, false);
+    assert.ok(result.cleanLapsCount >= 2);
+    assert.ok(result.pace > 48 && result.pace < 51);
+    assert.ok(result.regularidade > 0);
+});
+
+test("dashboard do piloto consolida campeonato e filtra etapa especifica", () => {
+    const rows = [
+        { campeonato_id: "camp-a", etapa_id: "e1", result: { points: 20 }, achievements: { win: true, podium: true, pole: true } },
+        { campeonato_id: "camp-a", etapa_id: "e2", result: { points: 15 }, achievements: { podium: true } },
+        { campeonato_id: "camp-b", etapa_id: "e1", result: { points: 10 }, achievements: {} }
+    ];
+    const all = analytics.consolidarPilotAnalytics(rows, { campeonatoId: "camp-a", etapaId: "all" });
+    assert.deepEqual(all.kpis, { races: 2, wins: 1, podiums: 2, poles: 1, points: 35, titles: 0 });
+    const stage = analytics.consolidarPilotAnalytics(rows, { campeonatoId: "camp-a", etapaId: "e2" });
+    assert.equal(stage.stages.length, 1);
+    assert.equal(stage.kpis.points, 15);
 });

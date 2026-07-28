@@ -5164,21 +5164,16 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao) {
 
     const regularidade = new Map();
     porPiloto.forEach((grupo, key) => {
-        const temposBase = grupo.voltas.filter(v => v._volta > 1).map(v => v._tempoSeg).filter(Number.isFinite);
-        const melhor = temposBase.length ? Math.min(...temposBase) : null;
-        const mediana = dashboardMediana(temposBase);
-        const limiarJoker = mediana ? mediana * 0.90 : null;
-        const limiarLenta = melhor ? melhor * 1.05 : null;
-        const limpas = temposBase.filter(t =>
-            (!limiarJoker || t >= limiarJoker) &&
-            (!limiarLenta || t <= limiarLenta)
-        );
-        const desvio = limpas.length >= 5 ? dashboardDesvioPadrao(limpas) : null;
+        const calculada = KartAnalytics.calcularRegularidade(grupo.voltas.map(v => ({
+            ...v, volta: v._volta, tempo_volta_segundos: v._tempoSeg
+        }))).items[0];
         regularidade.set(key, {
             piloto: grupo.piloto,
-            desvio,
-            limpas: limpas.length,
-            pace: dashboardMediana(limpas)
+            desvio: calculada?.regularidade ?? null,
+            limpas: Number(calculada?.cleanLapsCount || 0),
+            pace: calculada?.pace ?? null,
+            bestLapValid: calculada?.bestLapValid ?? null,
+            status: calculada?.status || "voltas_insuficientes"
         });
     });
 
@@ -5893,7 +5888,7 @@ async function renderRankingFirestore() {
    apenas consulta dashboardResumo (etapa) e dashboardGeral (campeonato).
    ============================================================================ */
 
-const DASHBOARD_RESUMO_VERSION = 4;
+const DASHBOARD_RESUMO_VERSION = 5;
 
 function dashboardPilotoPersistivel(item) {
     if (!item) return null;
@@ -6277,26 +6272,68 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         atualizadoEmISO: new Date().toISOString()
     }), { merge: true });
 
-    await persistirAnalyticsEtapa(resultadoDocRef, voltasCanonicas, pilotosCampeonato, voltaInfo.fonte);
+    await persistirAnalyticsEtapa(resultadoDocRef, voltasCanonicas, pilotosCampeonato, voltaInfo.fonte, stat, meta);
 
     if (atualizarGeral) await recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonato);
     limparCacheDashboardCampeonato(campeonatoDocId);
     return resumo;
 }
 
-async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonato, fonte = {}) {
+function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
+    const byId = rows => new Map((rows || []).map(row => [getDriverId(row), row]).filter(([id]) => id));
+    const resultados = byId(stat?.corrida), classificacao = byId(stat?.classificacao);
+    const regularidade = byId(analytics.regularidade);
+    const ultrapassagensCamp = byId(analytics.ultrapassagensCampeonato);
+    const ultrapassagensGeral = byId(analytics.ultrapassagensGeral);
+    const primeiro = analytics.snapshots?.[0]?.positions || [];
+    const primeiroCamp = KartAnalytics.filtrarSnapshot({ positions: primeiro }, new Set(pilotosLista.map(getDriverId)), "campeonato");
+    const rankBest = [...(analytics.regularidade || [])].filter(p => Number.isFinite(Number(p.bestLapValid))).sort((a, b) => Number(a.bestLapValid) - Number(b.bestLapValid));
+    const agora = new Date().toISOString();
+    return pilotosLista.map((driver, officialIndex) => {
+        const id = getDriverId(driver), result = resultados.get(id) || {}, quali = classificacao.get(id) || {};
+        const pace = regularidade.get(id) || {}, overCamp = ultrapassagensCamp.get(id) || {}, overAll = ultrapassagensGeral.get(id) || {};
+        const firstOverallIndex = primeiro.findIndex(p => getDriverId(p) === id), firstCampIndex = primeiroCamp.findIndex(p => getDriverId(p) === id);
+        const resultPosition = dashboardPosicaoCampeonato(result) < 999999 ? dashboardPosicaoCampeonato(result) : officialIndex + 1;
+        const qualifyingPosition = dashboardPosicaoCampeonato(quali) < 999999 ? dashboardPosicaoCampeonato(quali) : null;
+        const bestOverallIndex = rankBest.findIndex(p => getDriverId(p) === id);
+        const fastest = bestOverallIndex === 0;
+        const pole = qualifyingPosition === 1, win = resultPosition === 1;
+        return toFirestoreSafe({
+            analyticsVersion: KartAnalytics.VERSION, processedAt: agora,
+            driver_id: String(id), driver_name_original: DriverIdentity.getDriverName(driver),
+            driver_name_display: DriverIdentity.getDriverDisplayName(driver), kart_numero: DriverIdentity.normalizeKartNumber(driver.kart_numero || driver.kart),
+            campeonato_id: meta?.campeonato_id || "", campeonato: meta?.campeonato || "", etapa_id: meta?.resultadoDocId || "", etapa: Number(meta?.etapa || 0), dataCorrida: meta?.dataCorrida || "",
+            result: { positionOverall: Number(result.posicao_geral_arquivo || result.posicao_final || resultPosition), positionChampionship: resultPosition, points: Number(result.pontos || 0) + Number(result.melhor_tempo_ponto || 0) },
+            qualifying: { positionOverall: Number(quali.posicao_geral_arquivo || qualifyingPosition || 0) || null, positionChampionship: qualifyingPosition },
+            start: { gridPosition: qualifyingPosition, firstLapPosition: firstCampIndex >= 0 ? firstCampIndex + 1 : null, firstLapPositionOverall: firstOverallIndex >= 0 ? firstOverallIndex + 1 : null, delta: qualifyingPosition && firstCampIndex >= 0 ? qualifyingPosition - (firstCampIndex + 1) : null },
+            pace: { bestLap: pace.bestLapValid ?? null, pace: pace.pace ?? null, regularity: pace.regularidade ?? null, cleanLaps: Number(pace.cleanLapsCount || 0), totalLaps: Number(pace.totalLaps || 0), status: pace.status || "voltas_insuficientes" },
+            overtakes: { madeOverall: Number(overAll.feitas || 0), takenOverall: Number(overAll.tomadas || 0), balanceOverall: Number(overAll.saldo || 0), madeChampionship: Number(overCamp.feitas || 0), takenChampionship: Number(overCamp.tomadas || 0), balanceChampionship: Number(overCamp.saldo || 0) },
+            bestLapRank: { overall: bestOverallIndex >= 0 ? bestOverallIndex + 1 : null, championship: bestOverallIndex >= 0 ? rankBest.filter((p, i) => i <= bestOverallIndex && pilotosLista.some(d => getDriverId(d) === getDriverId(p))).length : null },
+            achievements: { pole, win, podium: resultPosition <= 3, fastestLap: fastest, hatTrick: pole && win && fastest, grandChelem: getDriverId(stat?.grandChelem) === id }
+        });
+    });
+}
+
+async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonato, fonte = {}, stat = null, meta = {}) {
     const analyticsRef = resultadoDocRef.collection("analytics").doc("volta_a_volta_v1");
-    const [participantesAntigos, voltasAntigas] = await Promise.all([
+    const [participantesAntigos, voltasAntigas, pilotosAnalyticsAntigos] = await Promise.all([
         resultadoDocRef.collection("participantes_etapa").get(),
-        resultadoDocRef.collection("voltas_processadas").get()
+        resultadoDocRef.collection("voltas_processadas").get(),
+        resultadoDocRef.collection("pilot_analytics").get()
     ]);
     const limpeza = [
         ...participantesAntigos.docs.map(doc => ({ tipo: "delete", ref: doc.ref })),
-        ...voltasAntigas.docs.map(doc => ({ tipo: "delete", ref: doc.ref }))
+        ...voltasAntigas.docs.map(doc => ({ tipo: "delete", ref: doc.ref })),
+        ...pilotosAnalyticsAntigos.docs.map(doc => ({ tipo: "delete", ref: doc.ref }))
     ];
     if (limpeza.length) await executarBatchFirestore(limpeza);
     if (!voltas?.length) {
-        await analyticsRef.set({ analyticsVersion: 1, available: false, fonte: fonte || {}, processedAt: new Date().toISOString() });
+        await analyticsRef.set({ analyticsVersion: KartAnalytics.VERSION, available: false, fonte: fonte || {}, processedAt: new Date().toISOString() });
+        const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
+        const analyticsVazio = KartAnalytics.processarVoltasEtapa([], pilotosLista);
+        await executarBatchFirestore(montarAnalyticsPilotosEtapa(analyticsVazio, pilotosLista, stat, meta).map(item => ({
+            tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(item.driver_id), payload: item
+        })));
         return null;
     }
     const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
@@ -6307,10 +6344,16 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         const id = String(v.driver_id || normalizarNomeComparacao(v.driver_name));
         if (!participantes.has(id)) participantes.set(id, { driver_id: String(v.driver_id || ""), driver_name: v.driver_name || id, kart_numero: v.kart_numero || "", isChampionship: idsOficiais.includes(normalizarDriverId(v.driver_id)) });
     });
-    const resolvedIds = new Set(voltas.map(v => normalizeDriverId(v.driver_id)).filter(id => idsOficiais.includes(id)));
+    const resolvedIds = new Set(voltas.map(v => normalizarDriverId(v.driver_id)).filter(id => idsOficiais.includes(id)));
     const analyticsValidation = {
         resultDrivers: idsOficiais.length,
         resolvedChampionshipDrivers: resolvedIds.size,
+        regularityDrivers: analytics.regularidade.filter(p => idsOficiais.includes(getDriverId(p))).length,
+        overtakeDrivers: analytics.ultrapassagensCampeonato.length,
+        pilotAnalyticsDrivers: pilotosLista.length,
+        snapshots: analytics.snapshots.map(snapshot => ({ lap: snapshot.lap || snapshot.numeroVolta, count: KartAnalytics.filtrarSnapshot(snapshot, new Set(idsOficiais), "campeonato").length })),
+        extras: analytics.snapshots.flatMap(snapshot => (snapshot.positions || []).filter(p => p.isChampionship && !idsOficiais.includes(getDriverId(p))).map(getDriverId)),
+        missing: pilotosLista.filter(p => !resolvedIds.has(getDriverId(p))).map(p => getDriverId(p)),
         unresolvedDrivers: pilotosLista.filter(p => !resolvedIds.has(getDriverId(p))).map(p => ({ driverId: getDriverId(p), name: DriverIdentity.getDriverName(p), kartNumber: p.kart_numero || "" }))
     };
     console.info("ANALYTICS STAGE VALIDATION", analyticsValidation);
@@ -6324,6 +6367,9 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         porPiloto.get(id).push(v);
     });
     porPiloto.forEach((laps, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("voltas_processadas").doc(normalizarDocId(id)), payload: { driver_id: id, laps } }));
+    montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta).forEach(item => ops.push({
+        tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(item.driver_id), payload: item
+    }));
     await executarBatchFirestore(ops);
     return analytics;
 }
@@ -6759,9 +6805,9 @@ function renderRegularidadeChart() {
 function abrirDetalheRegularidade(index) {
     const item = document.getElementById("regularidadeChart")?._sortedItems?.[index]; if (!item) return;
     const grid = Number(ETAPA_ANALYTICS_ATUAL.gridPace);
-    const propria = lap => lap.volta===1?'⚪ Não Classificada':lap.isBest?'🏆 Mais Rápida':!lap.clean?'🔴 Lenta / Fora da janela':lap.tempo<item.pace-item.regularidade?'🟢 Rápida':lap.tempo>item.pace+item.regularidade?'🔴 Lenta':'🔵 Normal';
+    const propria = lap => lap.volta===1?'⚪ Não Classificada':lap.classification==='joker_lap'?'🃏 Joker Lap / Anômala':lap.isBest?'🏆 Mais Rápida':!lap.clean?'🔴 Lenta / Fora da janela':lap.tempo<item.pace-item.regularidade?'🟢 Rápida':lap.tempo>item.pace+item.regularidade?'🔴 Lenta':'🔵 Normal';
     const compGrid = lap => { if (!Number.isFinite(grid)||!lap.tempo) return '-'; const d=(lap.tempo-grid)/grid; return d<=-.03?'Muito Acima da Média':d<=-.01?'Acima da Média':d<.01?'Média':d<.03?'Abaixo da Média':'Muito Abaixo da Média'; };
-    const overlay=document.createElement('div'); overlay.className='analytics-modal'; overlay.innerHTML=`<div class="analytics-modal-box"><button class="modal-close">×</button><h2>${htmlEscape(getDriverFullDisplayName(item))}</h2><p>As voltas são comparadas com a melhor volta do piloto (${item.bestLap.toFixed(3)}s) e com a média do grid (${Number.isFinite(grid)?grid.toFixed(3):'-'}s).</p><p><strong>Regularidade:</strong> ±${item.regularidade.toFixed(3)}s · <strong>Pace:</strong> ${item.pace.toFixed(3)}s</p><p class="hint">Voltas limpas: sem a volta 1 e sem voltas acima de 5% da melhor volta.</p><div class="dashboard-table-wrap"><table><tr><th>Volta</th><th>Tempo (s)</th><th>Comparação Própria</th><th>Comparação com o Grid</th></tr>${item.laps.map(l=>`<tr><td>${l.volta}</td><td>${l.tempo?.toFixed(3)||'-'}</td><td>${propria(l)}</td><td>${compGrid(l)}</td></tr>`).join('')}</table></div></div>`; document.body.appendChild(overlay); overlay.querySelector('.modal-close').onclick=()=>overlay.remove(); overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};
+    const overlay=document.createElement('div'); overlay.className='analytics-modal'; overlay.innerHTML=`<div class="analytics-modal-box"><button class="modal-close">×</button><h2>${htmlEscape(getDriverFullDisplayName(item))}</h2><p>As voltas são comparadas com a melhor volta válida do piloto (${item.bestLap.toFixed(3)}s) e com a média do grid (${Number.isFinite(grid)?grid.toFixed(3):'-'}s).</p><p><strong>Regularidade:</strong> ±${item.regularidade.toFixed(3)}s · <strong>Pace:</strong> ${item.pace.toFixed(3)}s</p><p class="hint">Voltas limpas: sem a volta 1, sem outliers abaixo de 80% da mediana e até 5% acima da melhor volta válida.</p><div class="dashboard-table-wrap"><table><tr><th>Volta</th><th>Tempo (s)</th><th>Comparação Própria</th><th>Comparação com o Grid</th></tr>${item.laps.map(l=>`<tr><td>${l.volta}</td><td>${l.tempo?.toFixed(3)||'-'}</td><td>${propria(l)}</td><td>${compGrid(l)}</td></tr>`).join('')}</table></div></div>`; document.body.appendChild(overlay); overlay.querySelector('.modal-close').onclick=()=>overlay.remove(); overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};
 }
 function setRaceMode(mode) {
     RACE_MODE = mode === "geral" ? "geral" : "campeonato";
@@ -6772,7 +6818,19 @@ function setRaceMode(mode) {
 
 function racePositionsForSnapshot(snapshot, mode = RACE_MODE) {
     const rows = Array.isArray(snapshot?.positions) ? snapshot.positions : [];
-    return mode === "geral" ? rows : filtrarPilotosDoCampeonato(rows);
+    if (mode === "geral") return rows;
+    const snapshotRenderizado = rows
+        .filter(p => DASHBOARD_STAGE_STATE.pilotosCampeonatoIds.has(String(p.driver_id)))
+        .map((p, index) => ({ ...p, positionChampionship: index + 1 }));
+    const expectedIds = DASHBOARD_STAGE_STATE.pilotosCampeonatoIds;
+    const visibleIds = new Set(snapshotRenderizado.map(p => String(p.driver_id)));
+    const extras = [...visibleIds].filter(id => !expectedIds.has(id));
+    if (extras.length) {
+        console.warn("[Kart] Evolução contém piloto externo no modo Campeonato", {
+            expected: [...expectedIds], visible: [...visibleIds], extras
+        });
+    }
+    return snapshotRenderizado;
 }
 
 function raceDisplayKey(item) {
