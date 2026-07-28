@@ -93,7 +93,22 @@
     }
 
     function getStageChampionshipDrivers(resultRows, registeredDrivers = []) {
-        const rows = Array.isArray(resultRows) && resultRows.length ? resultRows : registeredDrivers;
+        const registryByName = new Map();
+        (registeredDrivers || []).forEach(driver => {
+            const name = normalizeDriverName(getDriverName(driver));
+            const id = getDriverId(driver);
+            if (!name || !id) return;
+            if (!registryByName.has(name)) registryByName.set(name, []);
+            registryByName.get(name).push(driver);
+        });
+        // Resultado da Etapa define os membros. O cadastro serve apenas para
+        // hidratar o driver_id de linhas legadas, nunca para adicionar membros.
+        const source = Array.isArray(resultRows) && resultRows.length ? resultRows : registeredDrivers;
+        const rows = source.map(row => {
+            if (getDriverId(row)) return row;
+            const matches = registryByName.get(normalizeDriverName(getDriverName(row))) || [];
+            return matches.length === 1 ? { ...row, driver_id: getDriverId(matches[0]), identityResolution: "unique_registry_name" } : row;
+        });
         const byKey = new Map();
         rows.forEach(item => {
             const key = driverKey(item);
@@ -108,6 +123,33 @@
             // possui ID. Assim o fallback legado nunca suplanta um ID válido.
             legacyNames: new Set(drivers.map(item => normalizeDriverName(getDriverName(item))).filter(Boolean))
         };
+    }
+
+    function getOfficialStageDriverIds(resultRows, registeredDrivers = []) {
+        const official = getStageChampionshipDrivers(resultRows, registeredDrivers);
+        const missingDriverIds = official.drivers.filter(driver => !getDriverId(driver));
+        return { ...official, missingDriverIds };
+    }
+
+    // Filtra a lista da tomada, preservando estritamente a ordem do arquivo.
+    function filterStageQualifying(classificationRows, official) {
+        const rows = [...(classificationRows || [])].sort((a, b) => {
+            const position = item => {
+                for (const value of [item.positionOverall, item.posicao_geral_arquivo, item.posicao_final, item.posicao, item.pos]) {
+                    const n = Number(value);
+                    if (Number.isFinite(n) && n > 0) return n;
+                }
+                return Number.MAX_SAFE_INTEGER;
+            };
+            return position(a) - position(b);
+        });
+        return filterStageChampionshipDrivers(rows, official).map((item, index) => ({
+            ...item,
+            positionOverall: Number(item.positionOverall || item.posicao_geral_arquivo || item.posicao_final || item.posicao || item.pos) || null,
+            positionChampionship: index + 1,
+            posicao_classificacao_campeonato: index + 1,
+            posicao_largada_campeonato: index + 1
+        }));
     }
 
     function normalizeKartNumber(value) {
@@ -246,5 +288,5 @@
         };
     }
 
-    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getDriverName, cleanDriverDisplayName, getDriverDisplayName, getDriverShortDisplayName, driverKey, getStageReferenceRows, getStageChampionshipDrivers, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, filterStageChampionshipDrivers, reconcileStageChampionshipDrivers, compareDriverIdSets, compareStageDriverIds };
+    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getDriverName, cleanDriverDisplayName, getDriverDisplayName, getDriverShortDisplayName, driverKey, getStageReferenceRows, getStageChampionshipDrivers, getOfficialStageDriverIds, filterStageQualifying, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, filterStageChampionshipDrivers, reconcileStageChampionshipDrivers, compareDriverIdSets, compareStageDriverIds };
 }));

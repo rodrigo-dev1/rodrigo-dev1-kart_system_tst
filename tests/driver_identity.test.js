@@ -2,6 +2,61 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const identity = require("../driver_identity.js");
 const analytics = require("../kart_analytics.js");
+const integrity = require("../firestore_integrity.js");
+
+test("interrompe ID vazio antes de construir referencia Firestore", () => {
+    assert.throws(() => integrity.requireFirestoreId(" ", "etapaId", { etapa: "legada" }), /etapaId obrigatório ausente/);
+    assert.equal(integrity.requireFirestoreId(" etapa_3 ", "etapaId"), "etapa_3");
+    assert.equal(integrity.canonicalStageNumber("Etapa 3"), 3);
+});
+
+test("classificacao filtra membros preservando a ordem da tomada", () => {
+    const official = identity.getOfficialStageDriverIds(["A", "B", "C"].map(driver_id => ({ driver_id })));
+    const rows = ["X", "B", "Y", "A", "C"].map((driver_id, index) => ({ driver_id, posicao_geral_arquivo: index + 1 }));
+    const result = identity.filterStageQualifying(rows, official);
+    assert.deepEqual(result.map(row => row.driver_id), ["B", "A", "C"]);
+    assert.deepEqual(result.map(row => row.positionOverall), [2, 4, 5]);
+    assert.deepEqual(result.map(row => row.positionChampionship), [1, 2, 3]);
+});
+
+test("snapshot carrega retardatarios e oficiais ainda sem passagem", () => {
+    const official = ["A", "B", "C", "D"].map(driver_id => ({ driver_id, driver_name: driver_id }));
+    const laps = [
+        { driver_id: "A", volta: 8, volta_lider: 8, elapsed_time: 480 },
+        { driver_id: "B", volta: 8, volta_lider: 8, elapsed_time: 482 },
+        { driver_id: "C", volta: 7, volta_lider: 8, elapsed_time: 475 },
+        { driver_id: "D", volta: 6, volta_lider: 8, elapsed_time: 470 },
+        { driver_id: "X", volta: 8, volta_lider: 8, elapsed_time: 481 }
+    ];
+    const snapshot = analytics.gerarSnapshots(laps, official)[0];
+    assert.deepEqual(analytics.filtrarSnapshot(snapshot, new Set(["A", "B", "C", "D"])).map(row => row.driver_id), ["A", "B", "C", "D"]);
+    assert.deepEqual(snapshot.positions.filter(row => row.isChampionship).map(row => row.completedLaps), [8, 8, 7, 6]);
+});
+
+test("carry-forward mantem piloto e delta usa posicao relativa do campeonato", () => {
+    const official = ["A", "B", "C", "D"].map(driver_id => ({ driver_id }));
+    const laps = [
+        ...official.map((row, index) => ({ ...row, volta: 4, volta_lider: 4, elapsed_time: 240 + index })),
+        { driver_id: "A", volta: 5, volta_lider: 5, elapsed_time: 300 },
+        { driver_id: "B", volta: 5, volta_lider: 5, elapsed_time: 301 },
+        { driver_id: "C", volta: 5, volta_lider: 5, elapsed_time: 302 }
+    ];
+    const snapshots = analytics.gerarSnapshots(laps, official);
+    const d = snapshots[1].positions.find(row => row.driver_id === "D");
+    assert.equal(d.completedLaps, 4);
+    assert.equal(snapshots[1].positions.filter(row => row.isChampionship).length, 4);
+    const synthetic = analytics.calcularUltrapassagens([
+        { positions: [{ driver_id: "A", isChampionship: true, positionChampionship: 4, positionDeltaChampionship: 0 }] },
+        { positions: [{ driver_id: "A", isChampionship: true, positionChampionship: 2, positionDeltaChampionship: 2 }] }
+    ], true);
+    assert.equal(synthetic[0].feitas, 2);
+});
+
+test("processamento e idempotente para a mesma entrada", () => {
+    const official = ["A", "B"].map(driver_id => ({ driver_id }));
+    const laps = official.map((row, index) => ({ ...row, volta: 1, volta_lider: 1, elapsed_time: index + 1, tempo_volta_segundos: 60 }));
+    assert.deepEqual(analytics.processarVoltasEtapa(laps, official), analytics.processarVoltasEtapa(laps, official));
+});
 
 test("normaliza formatos equivalentes de driver_id", () => {
     for (const value of [41938, "41938", "[41938]", " 41938 "]) {
@@ -59,7 +114,8 @@ test("analytics preserva corrida completa e oficiais sem metrica ou ultrapassage
     const official = [{ driver_id: "1", driver_name: "OFICIAL COM VOLTA", isChampionship: true }, { driver_id: "2", driver_name: "OFICIAL SEM VOLTA", isChampionship: true }];
     const laps = [{ driver_id: "1", driver_name: "OFICIAL COM VOLTA", isChampionship: true, volta: 1, volta_lider: 1, elapsed_time: 2, tempo_volta_segundos: 60 }, { driver_id: "9", driver_name: "EXTERNO", isChampionship: false, volta: 1, volta_lider: 1, elapsed_time: 1, tempo_volta_segundos: 59 }];
     const result = analytics.processarVoltasEtapa(laps, official);
-    assert.deepEqual(result.snapshots[0].positions.map(p => p.positionOverall), [1, 2]);
+    assert.deepEqual(result.snapshots[0].positions.map(p => p.positionOverall), [1, 2, 3]);
+    assert.equal(result.snapshots[0].positions.find(p => p.driver_id === "2").stateSource, "awaiting_first_passage");
     assert.equal(result.regularidade.find(p => p.driver_id === "2").status, "voltas_insuficientes");
     assert.deepEqual(result.ultrapassagensCampeonato.map(p => p.driver_id).sort(), ["1", "2"]);
 });

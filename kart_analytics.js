@@ -4,7 +4,7 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 5;
+    const VERSION = 6;
     const num = value => {
         const n = Number(value);
         return Number.isFinite(n) ? n : null;
@@ -72,8 +72,9 @@
         const gridPace = mean(items.map(i => i.pace).filter(Number.isFinite));
         return { items, gridPace };
     }
-    function gerarSnapshots(voltas, idsCampeonato) {
-        const oficiais = new Set((idsCampeonato || []).map(normalizeDriverId).filter(Boolean));
+    function gerarSnapshots(voltas, officialDrivers = [], gridRows = []) {
+        const officialRows = (officialDrivers || []).map(item => typeof item === "object" ? item : { driver_id: item });
+        const oficiais = new Set(officialRows.map(identity.getDriverId).filter(Boolean));
         const grupos = new Map();
         (voltas || []).forEach(lap => {
             const id = key(lap);
@@ -84,6 +85,7 @@
         grupos.forEach(laps => laps.sort((a, b) => Number(a.elapsed_time) - Number(b.elapsed_time)));
         const numeros = [...new Set((voltas || []).map(v => Number(v.volta_lider)).filter(n => n > 0))].sort((a, b) => a - b);
         let anterior = new Map();
+        const grid = new Map((gridRows || []).map((row, index) => [identity.getDriverId(row), Number(row.positionChampionship || row.posicao_classificacao_campeonato || index + 1)]).filter(([id]) => id));
         return numeros.map(numeroVolta => {
             const passagem = [];
             grupos.forEach((laps, driverId) => {
@@ -91,7 +93,13 @@
                 const lap = candidatas[candidatas.length - 1];
                 if (lap) passagem.push({ driver_id: identity.getDriverId(lap), driver_name: lap.driver_name || driverId, kart_numero: lap.kart_numero || "", completedLaps: Number(lap.volta), leaderLap: numeroVolta, elapsedTime: num(lap.elapsed_time), lapTime: num(lap.tempo_volta_segundos), isChampionship: oficiais.has(identity.getDriverId(lap)) });
             });
-            passagem.sort((a, b) => b.completedLaps - a.completedLaps || a.elapsedTime - b.elapsedTime);
+            // Um oficial sem passagem até este instante continua representado.
+            officialRows.forEach(driver => {
+                const id = identity.getDriverId(driver);
+                if (!id || passagem.some(item => identity.getDriverId(item) === id)) return;
+                passagem.push({ driver_id: id, driver_name: identity.getDriverName(driver), kart_numero: driver.kart_numero || "", completedLaps: 0, leaderLap: numeroVolta, elapsedTime: null, lapTime: null, isChampionship: true, stateSource: grid.has(id) ? "grid" : "awaiting_first_passage", gridPosition: grid.get(id) || null });
+            });
+            passagem.sort((a, b) => b.completedLaps - a.completedLaps || (Number.isFinite(a.elapsedTime) ? a.elapsedTime : Infinity) - (Number.isFinite(b.elapsedTime) ? b.elapsedTime : Infinity) || (a.gridPosition || Infinity) - (b.gridPosition || Infinity));
             let oficialPos = 0;
             passagem.forEach((p, index) => {
                 p.positionOverall = index + 1;
@@ -133,7 +141,7 @@
         });
         return [...result.values()].map(i => ({ ...i, saldo: i.feitas - i.tomadas }));
     }
-    function processarVoltasEtapa(voltas, officialDrivers = []) {
+    function processarVoltasEtapa(voltas, officialDrivers = [], gridRows = []) {
         const officialRows = (officialDrivers || []).map(item => typeof item === "object" ? item : { driver_id: item });
         const idsCampeonato = officialRows.map(identity.getDriverId).filter(Boolean);
         const participants = new Map();
@@ -142,7 +150,7 @@
         const regularidade = calcularRegularidade(voltas);
         const regularityKeys = new Set(regularidade.items.map(key));
         participants.forEach((p, k) => { if (!regularityKeys.has(k)) regularidade.items.push({ driver_id: identity.getDriverId(p), driver_name: identity.getDriverName(p), kart_numero: p.kart_numero || "", isChampionship: p.isChampionship, regularidade: null, pace: null, bestLap: null, bestLapValid: null, cleanLaps: 0, cleanLapsCount: 0, totalLaps: 0, cleanLapNumbers: [], excludedLapNumbers: [], laps: [], status: "voltas_insuficientes" }); });
-        const snapshots = gerarSnapshots(voltas, idsCampeonato);
+        const snapshots = gerarSnapshots(voltas, officialRows, gridRows);
         return { analyticsVersion: VERSION, participants: [...participants.values()], regularidade: regularidade.items, gridPace: regularidade.gridPace, snapshots, ultrapassagensCampeonato: calcularUltrapassagens(snapshots, true, [...participants.values()]), ultrapassagensGeral: calcularUltrapassagens(snapshots, false, [...participants.values()]) };
     }
     function consolidarPilotAnalytics(rows, { campeonatoId = "", etapaId = "all" } = {}) {
