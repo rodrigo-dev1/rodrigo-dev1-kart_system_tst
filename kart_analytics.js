@@ -4,13 +4,14 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 2;
+    const VERSION = 3;
     const num = value => {
         const n = Number(value);
         return Number.isFinite(n) ? n : null;
     };
-    const normalizeDriverId = value => value === undefined || value === null ? "" : String(value).trim();
-    const key = item => normalizeDriverId(item.driver_id || item.id_piloto) || String(item.driver_name || "").trim();
+    const identity = typeof DriverIdentity !== "undefined" ? DriverIdentity : require("./driver_identity.js");
+    const normalizeDriverId = identity.normalizeDriverId;
+    const key = item => identity.driverKey(item);
     const mean = values => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
     const stddev = values => {
         const avg = mean(values);
@@ -33,7 +34,7 @@
             const regularidade = stddev(tempos);
             const base = laps[0] || {};
             return {
-                driver_id: driverId, driver_name: base.driver_name || driverId, kart_numero: base.kart_numero || "",
+                driver_id: identity.getDriverId(base), driver_name: base.driver_name || driverId, kart_numero: base.kart_numero || "",
                 bestLap, pace, regularidade, cleanLaps: limpas.length, totalLaps: laps.length,
                 laps: [...laps].sort((a, b) => Number(a.volta) - Number(b.volta)).map(l => ({
                     volta: Number(l.volta), tempo: num(l.tempo_volta_segundos), clean: limpas.includes(l), isBest: num(l.tempo_volta_segundos) === bestLap
@@ -60,7 +61,7 @@
             grupos.forEach((laps, driverId) => {
                 const candidatas = laps.filter(l => Number(l.volta_lider) <= numeroVolta);
                 const lap = candidatas[candidatas.length - 1];
-                if (lap) passagem.push({ driver_id: driverId, driver_name: lap.driver_name || driverId, kart_numero: lap.kart_numero || "", completedLaps: Number(lap.volta), leaderLap: numeroVolta, elapsedTime: num(lap.elapsed_time), lapTime: num(lap.tempo_volta_segundos), isChampionship: oficiais.has(driverId) });
+                if (lap) passagem.push({ driver_id: identity.getDriverId(lap), driver_name: lap.driver_name || driverId, kart_numero: lap.kart_numero || "", completedLaps: Number(lap.volta), leaderLap: numeroVolta, elapsedTime: num(lap.elapsed_time), lapTime: num(lap.tempo_volta_segundos), isChampionship: oficiais.has(identity.getDriverId(lap)) });
             });
             passagem.sort((a, b) => b.completedLaps - a.completedLaps || a.elapsedTime - b.elapsedTime);
             let oficialPos = 0;
