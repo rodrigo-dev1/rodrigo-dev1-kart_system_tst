@@ -4940,22 +4940,28 @@ function dashboardPilotoKey(item) {
 }
 
 function getDriverFullDisplayName(driver) {
-    const original = typeof driver === "string" ? driver : (driver?.driver_name || driver?.nome || driver?.piloto || "");
-    const limpo = String(original || "")
-        .replace(/^\s*\d+\s*-\s*/u, "")
-        .replace(/\[\s*[^\]]+\s*\]/gu, " ")
-        .replace(/(?:\s*-\s*)?\bRENTAL\b\s*$/giu, "")
-        .replace(/^\s*-+|-+\s*$/gu, "")
-        .replace(/\s+/gu, " ").trim();
+    if (typeof driver !== "string") {
+        const id = getDriverId(driver);
+        if (id && Array.isArray(DB?.pilotos)) {
+            const cadastro = DB.pilotos.find(p => getDriverId(p) === id);
+            const nomeCadastro = cadastro ? DriverIdentity.getDriverDisplayName(cadastro) : "";
+            if (nomeCadastro) return nomeCadastro;
+        }
+    }
+
+    const limpo = DriverIdentity.getDriverDisplayName(driver);
     return limpo || "-";
 }
 
 function getDriverShortName(driver) {
-    return getDriverFullDisplayName(driver).split(/\s+/u).slice(0, 2).join(" ");
+    const full = getDriverFullDisplayName(driver);
+    if (!full || full === "-") return "-";
+    return full.split(/\s+/u).slice(0, 2).join(" ");
 }
 
 function dashboardNomePiloto(item) {
-    return getDriverFullDisplayName(item);
+    // A home usa no máximo nome + sobrenome para não quebrar tabelas/cards no mobile.
+    return getDriverShortName(item);
 }
 
 function dashboardCadastroPiloto(item) {
@@ -5683,14 +5689,14 @@ function dashboardTabelaEtapa(stat) {
         <div class="dashboard-table-card">
             <div class="dashboard-section-title" style="margin-top:0;"><h3>🏁 Resultado da Etapa</h3><span>${stat.corrida.length} piloto(s)</span></div>
             <div class="dashboard-table-wrap">
-                <table class="dashboard-table">
-                    <tr><th class="stage-result-sticky-pos">Pos</th><th>Piloto</th><th>Nome</th><th>Grid</th><th>Kart</th><th>Voltas</th><th>Melhor Volta</th><th>Total</th><th>Pts</th></tr>
+                <table class="dashboard-table stage-table">
+                    <tr><th class="dashboard-sticky-pos">Pos</th><th>Piloto</th><th>Nome</th><th>Grid</th><th>Kart</th><th>Voltas</th><th>Melhor Volta</th><th>Total</th><th>Pts</th></tr>
                     ${stat.corrida.map((p, idx) => {
                         const grid = classMap.get(dashboardPilotoKey(p))?.pos || "-";
                         const pts = Number(p.pontos || 0) + Number(p.melhor_tempo_ponto || 0);
                         const medalha = ["🥇", "🥈", "🥉"][idx] || "";
                         return `<tr class="${idx < 3 ? `stage-result-top stage-result-top-${idx + 1}` : ""}">
-                            <td class="stage-result-sticky-pos"><strong>${medalha} ${idx + 1}º</strong></td>
+                            <td class="dashboard-sticky-pos"><strong>${medalha} ${idx + 1}º</strong></td>
                             <td>${dashboardMiniAvatar(p)}</td>
                             <td><strong>${htmlEscape(dashboardNomePiloto(p))}</strong></td>
                             <td>${grid}</td>
@@ -5707,10 +5713,11 @@ function dashboardTabelaEtapa(stat) {
         <div class="dashboard-table-card">
             <div class="dashboard-section-title" style="margin-top:0;"><h3>⏱️ Classificação / Tomada</h3><span>${stat.classificacao.length} piloto(s)</span></div>
             <div class="dashboard-table-wrap">
-                <table class="dashboard-table">
-                    <tr><th class="dashboard-sticky-identity">Pos&nbsp;&nbsp;Piloto</th><th>Nome</th><th>Kart</th><th>Melhor Volta</th><th>Voltas</th><th>Bônus</th></tr>
+                <table class="dashboard-table stage-table classification-table">
+                    <tr><th class="dashboard-sticky-pos">Pos</th><th>Piloto</th><th>Nome</th><th>Kart</th><th>Melhor Volta</th><th>Voltas</th><th>Bônus</th></tr>
                     ${stat.classificacao.map((p, idx) => `<tr>
-                        <td class="dashboard-sticky-identity"><div class="dashboard-identity-cell"><strong>${idx + 1}º</strong>${dashboardMiniAvatar(p)}</div></td>
+                        <td class="dashboard-sticky-pos"><strong>${idx + 1}º</strong></td>
+                        <td>${dashboardMiniAvatar(p)}</td>
                         <td><strong>${htmlEscape(dashboardNomePiloto(p))}</strong></td>
                         <td>${htmlEscape(p.kart_numero || "-")}</td>
                         <td>${htmlEscape(p.melhor_tempo || "-")}</td>
@@ -6332,22 +6339,33 @@ async function carregarAnalyticsEtapa(resultadoDocRef) {
     const resultadoRows = DriverIdentity.getStageReferenceRows(resultadoDocSnap.data() || {}, resultadoCollection, classificacaoCollection);
     const oficiaisEtapa = DriverIdentity.getStageChampionshipDrivers(resultadoRows, cadastrados.pilotos);
     const oficiais = { ids: oficiaisEtapa.ids, nomesLegados: oficiaisEtapa.legacyNames };
+    const marcarOficial = item => ({
+        ...(item || {}),
+        driver_id: getDriverId(item),
+        isChampionship: isChampionshipDriver(item, oficiais)
+    });
+    const participants = (data.participants || []).map(marcarOficial);
+    const regularidade = (data.regularidade || []).map(marcarOficial);
     const snapshots = (data.snapshots || []).map(snapshot => ({
         ...snapshot,
-        positions: (snapshot.positions || []).map(p => ({
-            ...p,
-            driver_id: getDriverId(p),
-            isChampionship: isChampionshipDriver(p, oficiais)
-        }))
+        positions: (snapshot.positions || []).map(marcarOficial)
     }));
+
+    const ultrapassagensCampeonatoBase = data.ultrapassagensCampeonato || KartAnalytics.calcularUltrapassagens(snapshots, true, participants);
+    const ultrapassagensGeralBase = data.ultrapassagensGeral || KartAnalytics.calcularUltrapassagens(snapshots, false, participants);
+
     return {
         ...data,
+        participants,
+        regularidade,
         snapshots,
         championshipDriverIds: [...oficiais.ids],
         championshipDriverNames: [...oficiais.nomesLegados],
         stageResultDrivers: resultadoRows,
-        ultrapassagensCampeonato: data.ultrapassagensCampeonato || KartAnalytics.calcularUltrapassagens(snapshots, true, data.participants || []),
-        ultrapassagensGeral: data.ultrapassagensGeral || KartAnalytics.calcularUltrapassagens(snapshots, false)
+        // Revalida a associação na leitura para corrigir analytics antigos sem
+        // exigir reprocessamento só por causa da apresentação.
+        ultrapassagensCampeonato: (ultrapassagensCampeonatoBase || []).map(marcarOficial).filter(i => i.isChampionship),
+        ultrapassagensGeral: (ultrapassagensGeralBase || []).map(marcarOficial)
     };
 }
 
@@ -6670,25 +6688,82 @@ function setRaceMode(mode) {
     document.getElementById("raceAll")?.classList.toggle("selected", RACE_MODE === "geral");
     renderRaceSnapshot();
 }
+
+function racePositionsForSnapshot(snapshot, mode = RACE_MODE) {
+    const rows = Array.isArray(snapshot?.positions) ? snapshot.positions : [];
+    return mode === "geral" ? rows : rows.filter(p => p.isChampionship === true);
+}
+
+function raceDisplayKey(item) {
+    return DriverIdentity.driverKey(item) || `name:${DriverIdentity.normalizeDriverName(DriverIdentity.getDriverName(item))}`;
+}
+
+function raceDeltaVisual(item, currentPosition, snapshotIndex, mode = RACE_MODE) {
+    if (snapshotIndex <= 0) return 0;
+    const previousSnapshot = ETAPA_ANALYTICS_ATUAL?.snapshots?.[snapshotIndex - 1];
+    const previousRows = racePositionsForSnapshot(previousSnapshot, mode);
+    const key = raceDisplayKey(item);
+    const previousIndex = previousRows.findIndex(p => raceDisplayKey(p) === key);
+    return previousIndex >= 0 ? (previousIndex + 1) - currentPosition : 0;
+}
+
+function raceGapVisual(item, previousItem) {
+    if (!previousItem) return "Líder";
+    const currentLaps = Number(item?.completedLaps);
+    const previousLaps = Number(previousItem?.completedLaps);
+    if (Number.isFinite(currentLaps) && Number.isFinite(previousLaps) && previousLaps > currentLaps) {
+        const laps = previousLaps - currentLaps;
+        return `+${laps} volta${laps === 1 ? "" : "s"}`;
+    }
+    const currentElapsed = Number(item?.elapsedTime);
+    const previousElapsed = Number(previousItem?.elapsedTime);
+    if (Number.isFinite(currentElapsed) && Number.isFinite(previousElapsed)) {
+        return `+${Math.max(0, currentElapsed - previousElapsed).toFixed(3)}s`;
+    }
+    return "-";
+}
+
 function renderRaceSnapshot() {
-    const snaps=ETAPA_ANALYTICS_ATUAL?.snapshots||[], alvo=document.getElementById('raceSnapshot'), label=document.getElementById('raceLapLabel'); if(!alvo||!snaps.length)return;
-    RACE_SNAPSHOT_INDEX=Math.max(0,Math.min(RACE_SNAPSHOT_INDEX,snaps.length-1)); const snap=snaps[RACE_SNAPSHOT_INDEX]; label.textContent=`VOLTA ${snap.numeroVolta} / ${snaps[snaps.length-1].numeroVolta}`;
-    document.getElementById("raceChamp")?.classList.toggle("selected", RACE_MODE === "campeonato"); document.getElementById("raceAll")?.classList.toggle("selected", RACE_MODE === "geral");
-    const positions=(snap.positions||[]).filter(p=>RACE_MODE==='geral'||p.isChampionship);
-    label.textContent += ` · ${positions.length} piloto(s)`;
+    const snaps = ETAPA_ANALYTICS_ATUAL?.snapshots || [];
+    const alvo = document.getElementById("raceSnapshot");
+    const label = document.getElementById("raceLapLabel");
+    if (!alvo || !label || !snaps.length) return;
+
+    RACE_SNAPSHOT_INDEX = Math.max(0, Math.min(RACE_SNAPSHOT_INDEX, snaps.length - 1));
+    const snap = snaps[RACE_SNAPSHOT_INDEX];
+    const positions = racePositionsForSnapshot(snap, RACE_MODE);
+
+    document.getElementById("raceChamp")?.classList.toggle("selected", RACE_MODE === "campeonato");
+    document.getElementById("raceAll")?.classList.toggle("selected", RACE_MODE === "geral");
+    label.textContent = `VOLTA ${snap.numeroVolta} / ${snaps[snaps.length - 1].numeroVolta} · ${positions.length} piloto(s)`;
+
     if (RACE_MODE === "campeonato" && ETAPA_ANALYTICS_ATUAL?.stageResultDrivers?.length) {
         const check = DriverIdentity.compareStageDriverIds(ETAPA_ANALYTICS_ATUAL.stageResultDrivers, snap.positions || [], positions);
-        console.info("Validação Pilotos do Campeonato", {
-            EXPECTED: check.expectedCount,
-            "VOLTA A VOLTA": check.lapCount,
-            "EXPECTED COM VOLTAS": check.expectedInLapCount,
-            EXIBIDOS: check.actualCount,
-            MISSING: check.missing,
-            UNEXPECTED: check.unexpected
-        });
         if (check.missing.length || check.unexpected.length) console.warn("Inconsistência de pilotos da etapa", check);
     }
-    alvo.innerHTML=`<div class="race-table">${positions.map(p=>{const pos=p.positionOverall, delta=p.positionDeltaOverall, laps=p.lapsBehindPreviousOverall, gapValue=p.gapToPreviousOverall; const gap=pos===1?'Líder':laps?`+${laps} volta(s)`: `+${Number(gapValue||0).toFixed(3)}s`; const tooltip=`${getDriverFullDisplayName(p)} | Kart: ${p.kart_numero||'-'} | Posição: P${pos} | Gap: ${gap}`; return `<div class="race-row" title="${htmlEscape(tooltip)}"><b class="race-position">P${pos}</b><span class="race-track-cell"><i class="race-track" style="width:${Math.max(12,100-pos*7)}%"></i></span><span class="race-driver"><strong>${htmlEscape(getDriverShortName(p))}</strong><small>${gap}</small></span><em class="${delta>0?'gain':delta<0?'loss':''}">${RACE_SNAPSHOT_INDEX===0?'Largada':delta>0?`▲ +${delta}`:delta<0?`▼ ${delta}`:'= 0'}</em></div>`;}).join('')}</div>`;
+
+    if (!positions.length) {
+        alvo.innerHTML = '<div class="analytics-state">Nenhum piloto disponível neste filtro.</div>';
+        return;
+    }
+
+    alvo.innerHTML = `<div class="race-table">${positions.map((p, index) => {
+        // No modo campeonato a posição é SEMPRE relativa aos pilotos oficiais.
+        // Isso evita mostrar P7/P10 quando na disputa do campeonato o piloto é P2/P3.
+        const pos = RACE_MODE === "campeonato" ? index + 1 : (Number(p.positionOverall) || index + 1);
+        const delta = raceDeltaVisual(p, pos, RACE_SNAPSHOT_INDEX, RACE_MODE);
+        const previous = positions[index - 1] || null;
+        const gap = raceGapVisual(p, previous);
+        const tooltip = `${getDriverFullDisplayName(p)} | Kart: ${p.kart_numero || "-"} | Posição: P${pos} | Gap: ${gap}`;
+        const trackWidth = Math.max(18, 100 - ((pos - 1) * 10));
+        const movement = RACE_SNAPSHOT_INDEX === 0 ? "Largada" : delta > 0 ? `▲ +${delta}` : delta < 0 ? `▼ ${delta}` : "= 0";
+        return `<div class="race-row" title="${htmlEscape(tooltip)}">
+            <b class="race-position">P${pos}</b>
+            <span class="race-track-cell"><i class="race-track" style="width:${trackWidth}%"></i></span>
+            <span class="race-driver"><strong>${htmlEscape(getDriverShortName(p))}</strong><small>${gap}</small></span>
+            <em class="${delta > 0 ? "gain" : delta < 0 ? "loss" : ""}">${movement}</em>
+        </div>`;
+    }).join("")}</div>`;
 }
 function proximaVolta(){const n=ETAPA_ANALYTICS_ATUAL?.snapshots?.length||0;if(n){RACE_SNAPSHOT_INDEX=Math.min(n-1,RACE_SNAPSHOT_INDEX+1);renderRaceSnapshot();}}
 function voltaAnterior(){RACE_SNAPSHOT_INDEX=Math.max(0,RACE_SNAPSHOT_INDEX-1);renderRaceSnapshot();}

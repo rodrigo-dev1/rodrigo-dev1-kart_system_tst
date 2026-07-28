@@ -32,7 +32,59 @@
     }
 
     function getDriverName(item) {
-        return String(item?.driver_name || item?.nome || item?.piloto || "").trim();
+        if (typeof item === "string") return item.trim();
+        return String(
+            item?.driver_name ||
+            item?.nome ||
+            item?.piloto ||
+            item?.name ||
+            item?.display_name ||
+            item?.displayName ||
+            item?.piloto_original ||
+            ""
+        ).trim();
+    }
+
+    function cleanDriverDisplayName(value) {
+        let text = String(value || "")
+            .replace(/\u00a0/g, " ")
+            .replace(/[‐‑‒–—−]/g, "-")
+            .replace(/\s+/g, " ")
+            .trim();
+
+        if (!text) return "";
+
+        // IDs do piloto nunca fazem parte do nome mostrado.
+        text = text.replace(/\[\s*[^\]]+\s*\]/g, " ").replace(/\s+/g, " ").trim();
+
+        // O cabeçalho do volta a volta costuma vir como:
+        // "034 - LEONARDO LEMES - RENTAL". Trabalhar por segmentos torna a
+        // limpeza tolerante a hífens extras e dados antigos já persistidos.
+        let parts = text.split(/\s+-\s+/).map(part => part.trim()).filter(Boolean);
+        while (parts.length && /^\d{1,4}$/.test(parts[0])) parts.shift();
+        while (parts.length && /^RENTAL(?:\s+.*)?$/i.test(parts[parts.length - 1])) parts.pop();
+        text = parts.join(" - ");
+
+        // Fallbacks para formatos sem espaços ao redor do hífen.
+        text = text
+            .replace(/^\s*\d{1,4}\s*-\s*/u, "")
+            .replace(/(?:\s*-\s*)?\bRENTAL\b(?:\s*-\s*)*$/iu, "")
+            .replace(/^\s*-+|-+\s*$/gu, "")
+            .replace(/\s+/gu, " ")
+            .trim();
+
+        return text;
+    }
+
+    function getDriverDisplayName(item) {
+        return cleanDriverDisplayName(getDriverName(item));
+    }
+
+    function getDriverShortDisplayName(item, maxWords = 2) {
+        const full = getDriverDisplayName(item);
+        if (!full) return "";
+        const limit = Math.max(1, Number(maxWords) || 2);
+        return full.split(/\s+/u).slice(0, limit).join(" ");
     }
 
     function driverKey(item) {
@@ -157,5 +209,5 @@
         };
     }
 
-    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getDriverName, driverKey, getStageReferenceRows, getStageChampionshipDrivers, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, compareStageDriverIds };
+    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getDriverName, cleanDriverDisplayName, getDriverDisplayName, getDriverShortDisplayName, driverKey, getStageReferenceRows, getStageChampionshipDrivers, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, compareStageDriverIds };
 }));

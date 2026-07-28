@@ -63,3 +63,20 @@ test("analytics preserva corrida completa e oficiais sem metrica ou ultrapassage
     assert.equal(result.regularidade.find(p => p.driver_id === "2").status, "insufficient_data");
     assert.deepEqual(result.ultrapassagensCampeonato.map(p => p.driver_id).sort(), ["1", "2"]);
 });
+
+test("limpa kart, id e classe RENTAL apenas na apresentacao", () => {
+    const casos = [
+        ["034 - LEONARDO LEMES - RENTAL", "LEONARDO LEMES"],
+        ["050 - [231138] RODRIGO CRUZ - RENTAL", "RODRIGO CRUZ"],
+        ["[4196] JÚLIO CEZAR", "JÚLIO CEZAR"],
+        ["008 - JÚLIO CEZAR - RENTAL -", "JÚLIO CEZAR"]
+    ];
+    for (const [entrada, esperado] of casos) {
+        assert.equal(identity.cleanDriverDisplayName(entrada), esperado);
+    }
+});
+
+test("nome curto usa no maximo duas palavras e aceita campos legados", () => {
+    assert.equal(identity.getDriverShortDisplayName({ name: "034 - CARLOS EDUARDO DA SILVA - RENTAL" }), "CARLOS EDUARDO");
+    assert.equal(identity.getDriverDisplayName({ piloto_original: "[41938] LEONARDO LEMES" }), "LEONARDO LEMES");
+});

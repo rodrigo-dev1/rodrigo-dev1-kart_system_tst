@@ -116,8 +116,10 @@
         .podium-name { font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         .podium-meta { color:#9ca6b5; font-size:11px; margin-top:3px; }
         .dashboard-table-card { background:#171c24; border:1px solid #303744; border-radius:16px; padding:14px; margin-bottom:14px; overflow:hidden; }
-        .dashboard-table-wrap { width:100%; overflow-x:auto; }
-        .dashboard-table { min-width:680px; margin:0; background:transparent; }
+        .dashboard-table-wrap { width:100%; overflow-x:auto; overflow-y:visible; position:relative; -webkit-overflow-scrolling:touch; overscroll-behavior-inline:contain; }
+        .dashboard-table { min-width:680px; margin:0; background:transparent; border-collapse:separate; border-spacing:0; overflow:visible; }
+        .dashboard-table.stage-table { min-width:720px; }
+        .dashboard-table.classification-table { min-width:620px; }
         .dashboard-table th { background:#222833; color:#ff9e9e; }
         .dashboard-table td, .dashboard-table th { padding:10px 9px; font-size:12px; }
         .dashboard-table tr.stage-result-top td { font-size:13px; background:rgba(255,202,92,.07); border-bottom-color:#66552d; }
@@ -127,10 +129,12 @@
         .dashboard-table th.dashboard-sticky-identity { z-index:4; background:#222833; }
         .dashboard-table tr.stage-result-top td.dashboard-sticky-identity { background:#252725; }
         .dashboard-table tr.stage-result-top-1 td.dashboard-sticky-identity { background:#302d25; }
-        .dashboard-table .stage-result-sticky-pos { position:sticky; left:0; z-index:2; min-width:72px; background:#171c24; box-shadow:5px 0 8px -7px rgba(0,0,0,.9); white-space:nowrap; }
-        .dashboard-table th.stage-result-sticky-pos { z-index:4; background:#222833; }
-        .dashboard-table tr.stage-result-top td.stage-result-sticky-pos { background:#252725; }
-        .dashboard-table tr.stage-result-top-1 td.stage-result-sticky-pos { background:#302d25; }
+        .dashboard-table .dashboard-sticky-pos { position:sticky; left:0; z-index:5; min-width:72px; width:72px; background:#171c24; box-shadow:6px 0 9px -7px rgba(0,0,0,.95); white-space:nowrap; }
+        .dashboard-table th.dashboard-sticky-pos { z-index:7; background:#222833; }
+        .dashboard-table tr.stage-result-top td.dashboard-sticky-pos { background:#252725; }
+        .dashboard-table tr.stage-result-top-1 td.dashboard-sticky-pos { background:#302d25; }
+        /* Compatibilidade com marcação antiga que possa existir em HTML cacheado. */
+        .dashboard-table .stage-result-sticky-pos { position:sticky; left:0; z-index:5; min-width:72px; width:72px; background:#171c24; box-shadow:6px 0 9px -7px rgba(0,0,0,.95); white-space:nowrap; }
         .dashboard-identity-cell { display:flex; align-items:center; justify-content:space-between; gap:7px; white-space:nowrap; }
         .dashboard-mini-avatar { width:30px; height:30px; flex:0 0 30px; border-radius:50%; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#303744; font-size:10px; font-weight:800; }
         .dashboard-mini-avatar img { width:100%; height:100%; object-fit:cover; }
@@ -169,17 +173,17 @@
         .race-controls { display:flex; justify-content:center; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
         .race-controls button, .analytics-toggle button { width:auto; margin:0; padding:9px 13px; background:#29313d; }
         .race-scroll { width:100%; overflow-x:auto; overscroll-behavior-inline:contain; }
-        .race-table { min-width:560px; }
-        .race-row { display:grid; grid-template-columns:45px minmax(90px,280px) minmax(155px,1fr) 70px; align-items:center; gap:8px; min-height:52px; transition:transform .45s ease; }
+        .race-table { min-width:500px; }
+        .race-row { display:grid; grid-template-columns:45px minmax(75px,220px) minmax(150px,1fr) 70px; align-items:center; gap:8px; min-height:52px; transition:transform .45s ease; }
         .race-position { position:sticky; left:0; z-index:2; align-self:stretch; display:flex; align-items:center; background:#171c24; box-shadow:5px 0 7px -7px #000; }
-        .race-track-cell { width:clamp(90px,24vw,280px); }
+        .race-track-cell { width:clamp(75px,20vw,220px); }
         .race-row small { display:block; color:#aeb6c4; margin-top:3px; } .race-track { display:block; height:7px; background:linear-gradient(90deg,#ff4b4b,#ffb74d); border-radius:8px; transition:width .45s ease; }
         .race-row em { font-style:normal; color:#aeb6c4; }.race-row .gain{color:#36c98f}.race-row .loss{color:#ff6b6b}
         .analytics-toggle { display:flex; gap:8px; margin-bottom:10px; }.analytics-toggle .selected{background:#ff4b4b}
         .analytics-kpis { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:10px 0; }.analytics-kpis span{background:#222a35;padding:8px;border-radius:8px;font-size:11px}
-        .overtake-head,.metric-row.overtake { display:grid; grid-template-columns:minmax(105px,1.15fr) minmax(80px,1fr) minmax(80px,1fr); gap:8px; align-items:center; }
+        .overtake-head,.metric-row.overtake { display:grid; grid-template-columns:minmax(120px,180px) minmax(90px,1fr) minmax(90px,1fr); gap:8px; align-items:center; }
         .overtake-head { color:#8f99a8; font-size:10px; font-weight:800; text-transform:uppercase; padding:5px 8px; }
-        .overtake-bar { display:grid; grid-template-columns:minmax(20px,1fr) 28px; align-items:center; gap:5px; }
+        .overtake-bar { display:grid; grid-template-columns:minmax(28px,1fr) 32px; align-items:center; gap:5px; min-width:0; }
         .overtake-bar i { height:14px; }.metric-row .made{background:#36c98f}.metric-row .lost{background:#ff6b6b}
         .analytics-modal { position:fixed; inset:0; z-index:1000010; background:rgba(0,0,0,.78); display:flex; align-items:center; justify-content:center; padding:14px; }
         .analytics-modal-box { position:relative; width:min(900px,96vw); max-height:92vh; overflow:auto; background:#1d2129; border:1px solid #465063; border-radius:16px; padding:20px; }
@@ -188,8 +192,10 @@
             .analytics-card{padding:12px;overflow:hidden}.analytics-card h3{font-size:16px}
             .metric-row{grid-template-columns:minmax(95px,120px) minmax(55px,1fr) 70px;padding-inline:3px}
             .race-filter button{flex:1;padding:9px 7px;font-size:11px}.race-controls{display:grid;grid-template-columns:44px minmax(112px,1fr) 44px;gap:8px}.race-controls strong{grid-column:1/-1;grid-row:1;text-align:center}.race-controls button{min-height:40px;padding:8px;margin:0}.race-controls #racePlay{grid-column:2}.race-controls button:last-child{grid-column:3}
-            .race-table{min-width:475px}.race-row{grid-template-columns:42px minmax(70px,120px) 165px 62px}.race-track-cell{width:clamp(70px,26vw,120px)}
-            .analytics-modal-box{width:96vw;padding:14px}.analytics-kpis{grid-template-columns:1fr}.overtake-head,.metric-row.overtake{grid-template-columns:minmax(100px,1.1fr) minmax(75px,1fr) minmax(75px,1fr)}
+            .race-table{min-width:420px}.race-row{grid-template-columns:42px minmax(56px,92px) 155px 58px}.race-track-cell{width:clamp(56px,20vw,92px)}
+            .dashboard-table .dashboard-sticky-pos,.dashboard-table .stage-result-sticky-pos{min-width:64px;width:64px;padding-inline:6px}
+            .dashboard-table.stage-table{min-width:680px}.dashboard-table.classification-table{min-width:560px}
+            .analytics-modal-box{width:96vw;padding:14px}.analytics-kpis{grid-template-columns:1fr}.overtake-head,.metric-row.overtake{grid-template-columns:minmax(95px,118px) minmax(72px,1fr) minmax(72px,1fr);gap:6px}.metric-row.overtake{padding-inline:2px}
         }
 
     </style>
