@@ -384,7 +384,7 @@ async function atualizarPreviewImportacaoAtual() {
 window.atualizarPreviewImportacaoAtual = atualizarPreviewImportacaoAtual;
 
 function getCampeonatoFirestoreRef(campeonato) {
-    const campeonatoDocId = normalizarDocId(campeonato);
+    const campeonatoDocId = FirestoreIntegrity.requireFirestoreId(normalizarDocId(campeonato), "campeonatoId", { campeonato });
 
     return {
         campeonatoDocId,
@@ -393,7 +393,12 @@ function getCampeonatoFirestoreRef(campeonato) {
 }
 
 function getResultadoFinalDocId(etapa, dataCorrida) {
-    const etapaId = normalizarDocId(`etapa_${etapa || "sem_etapa"}`);
+    const etapaNumero = FirestoreIntegrity.canonicalStageNumber(etapa);
+    const etapaId = FirestoreIntegrity.requireFirestoreId(
+        etapaNumero ? normalizarDocId(`etapa_${etapaNumero}`) : "",
+        "etapaId",
+        { etapa, dataCorrida }
+    );
     const dataId = normalizarDocId(dataCorrida || hojeISO());
 
     return `${etapaId}_${dataId}`;
@@ -6205,7 +6210,7 @@ async function dashboardLimparLinhasFantasmaVoltaAVolta(resultadoDocRef) {
 
 async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, conteudoVoltaAtual = "", nomeArquivoVoltaAtual = "", idImportacaoVoltaAtual = "", atualizarGeral = true }) {
     const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
-    const resultadoDocId = getResultadoFinalDocId(etapa, dataCorrida);
+    const resultadoDocId = FirestoreIntegrity.requireFirestoreId(getResultadoFinalDocId(etapa, dataCorrida), "etapaId", { campeonato, etapa, dataCorrida });
     const resultadoDocRef = campRef.collection("resultado_final").doc(resultadoDocId);
     await dashboardLimparLinhasFantasmaVoltaAVolta(resultadoDocRef);
     const [resultadoSnap, corridaSnap, classificacaoSnap, vinculosVoltaSnap] = await Promise.all([
@@ -6230,15 +6235,21 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
     // antigos podem ter apenas parte dos oficiais na subcollection, enquanto
     // dashboardResumo.corrida preserva o resultado completo exibido (11 x 6).
     const corrida = DriverIdentity.getStageReferenceRows(meta, corridaCollection, classificacaoCollection);
-    const oficiaisEtapa = DriverIdentity.getStageChampionshipDrivers(corrida, pilotosCadastrados.pilotos);
+    const oficiaisEtapa = DriverIdentity.getOfficialStageDriverIds(corrida, pilotosCadastrados.pilotos);
+    if (oficiaisEtapa.missingDriverIds.length) {
+        throw new Error(`driverId obrigatório ausente no reprocessamento (${JSON.stringify({ campeonato: campeonatoDocId, etapa: resultadoDocId, pilotos: oficiaisEtapa.missingDriverIds.map(DriverIdentity.getDriverName) })})`);
+    }
     const pilotosCampeonato = {
         pilotos: oficiaisEtapa.drivers,
         ids: oficiaisEtapa.ids,
         nomesLegados: oficiaisEtapa.legacyNames,
         nomes: oficiaisEtapa.legacyNames
     };
-    const classificacao = classificacaoCollection
-        .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId, pilotosCampeonato));
+    const classificacao = DriverIdentity.filterStageQualifying(classificacaoCollection, oficiaisEtapa);
+    const classificacaoIds = new Set(classificacao.map(getDriverId));
+    oficiaisEtapa.ids.forEach(driverId => {
+        if (!classificacaoIds.has(driverId)) console.warn("[Kart] piloto oficial ausente na classificação", { campeonatoId: campeonatoDocId, etapaId: resultadoDocId, driver_id: driverId });
+    });
     const voltaInfo = await dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVoltaAtual, nomeArquivoVoltaAtual, idImportacaoVoltaAtual);
     const vinculosVolta = vinculosVoltaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
     const voltasCanonicas = dashboardCanonicalizarVoltasEtapa(
@@ -6316,6 +6327,11 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
 
 async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonato, fonte = {}, stat = null, meta = {}) {
     const analyticsRef = resultadoDocRef.collection("analytics").doc("volta_a_volta_v1");
+    const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
+    pilotosLista.forEach(driver => FirestoreIntegrity.requireFirestoreId(getDriverId(driver), "driverId", { campeonatoId: meta?.campeonato_id, etapaId: meta?.resultadoDocId, driver: DriverIdentity.getDriverName(driver) }));
+    // Todo o cálculo e a validação acontecem antes de qualquer exclusão.
+    const analytics = KartAnalytics.processarVoltasEtapa(voltas || [], pilotosLista, stat?.classificacao || []);
+    const pilotAnalytics = montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta);
     const [participantesAntigos, voltasAntigas, pilotosAnalyticsAntigos] = await Promise.all([
         resultadoDocRef.collection("participantes_etapa").get(),
         resultadoDocRef.collection("voltas_processadas").get(),
@@ -6326,19 +6342,13 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         ...voltasAntigas.docs.map(doc => ({ tipo: "delete", ref: doc.ref })),
         ...pilotosAnalyticsAntigos.docs.map(doc => ({ tipo: "delete", ref: doc.ref }))
     ];
-    if (limpeza.length) await executarBatchFirestore(limpeza);
     if (!voltas?.length) {
-        await analyticsRef.set({ analyticsVersion: KartAnalytics.VERSION, available: false, fonte: fonte || {}, processedAt: new Date().toISOString() });
-        const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
-        const analyticsVazio = KartAnalytics.processarVoltasEtapa([], pilotosLista);
-        await executarBatchFirestore(montarAnalyticsPilotosEtapa(analyticsVazio, pilotosLista, stat, meta).map(item => ({
-            tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(item.driver_id), payload: item
-        })));
+        const ops = [...limpeza, { tipo: "set", ref: analyticsRef, payload: { analyticsVersion: KartAnalytics.VERSION, available: false, fonte: fonte || {}, processedAt: new Date().toISOString() } }];
+        pilotAnalytics.forEach(item => ops.push({ tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(FirestoreIntegrity.requireFirestoreId(item.driver_id, "driverId", { etapaId: meta?.resultadoDocId })), payload: item }));
+        await executarBatchFirestore(ops);
         return null;
     }
-    const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
     const idsOficiais = pilotosLista.map(getDriverId).filter(Boolean);
-    const analytics = KartAnalytics.processarVoltasEtapa(voltas, pilotosLista);
     const participantes = new Map();
     voltas.forEach(v => {
         const id = String(v.driver_id || normalizarNomeComparacao(v.driver_name));
@@ -6356,19 +6366,20 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         missing: pilotosLista.filter(p => !resolvedIds.has(getDriverId(p))).map(p => getDriverId(p)),
         unresolvedDrivers: pilotosLista.filter(p => !resolvedIds.has(getDriverId(p))).map(p => ({ driverId: getDriverId(p), name: DriverIdentity.getDriverName(p), kartNumber: p.kart_numero || "" }))
     };
-    console.info("ANALYTICS STAGE VALIDATION", analyticsValidation);
-    await analyticsRef.set(toFirestoreSafe({ ...analytics, analyticsValidation, available: true, fonte: fonte || {}, processedAt: new Date().toISOString() }));
-    const ops = [];
-    participantes.forEach((p, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("participantes_etapa").doc(normalizarDocId(id)), payload: p }));
+    const validation = FirestoreIntegrity.validateStageAnalytics({ officialDrivers: pilotosLista, regularity: analytics.regularidade, qualifying: stat?.classificacao, overtakes: analytics.ultrapassagensCampeonato, pilotAnalytics, snapshots: analytics.snapshots }, getDriverId);
+    analyticsValidation.consistency = validation;
+    validation.snapshots.forEach(snapshot => { if (snapshot.missing.length) console.warn("[Kart/Snapshot]", snapshot); });
+    const ops = [...limpeza, { tipo: "set", ref: analyticsRef, payload: toFirestoreSafe({ ...analytics, analyticsValidation, available: true, fonte: fonte || {}, processedAt: new Date().toISOString() }) }];
+    participantes.forEach((p, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("participantes_etapa").doc(FirestoreIntegrity.requireFirestoreId(normalizarDocId(id), "driverId", { etapaId: meta?.resultadoDocId, collection: "participantes_etapa" })), payload: p }));
     const porPiloto = new Map();
     voltas.forEach(v => {
         const id = String(v.driver_id || normalizarNomeComparacao(v.driver_name));
         if (!porPiloto.has(id)) porPiloto.set(id, []);
         porPiloto.get(id).push(v);
     });
-    porPiloto.forEach((laps, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("voltas_processadas").doc(normalizarDocId(id)), payload: { driver_id: id, laps } }));
-    montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta).forEach(item => ops.push({
-        tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(item.driver_id), payload: item
+    porPiloto.forEach((laps, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("voltas_processadas").doc(FirestoreIntegrity.requireFirestoreId(normalizarDocId(id), "driverId", { etapaId: meta?.resultadoDocId, collection: "voltas_processadas" })), payload: { driver_id: id, laps } }));
+    pilotAnalytics.forEach(item => ops.push({
+        tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(FirestoreIntegrity.requireFirestoreId(item.driver_id, "driverId", { etapaId: meta?.resultadoDocId, collection: "pilot_analytics" })), payload: item
     }));
     await executarBatchFirestore(ops);
     return analytics;
@@ -6506,17 +6517,21 @@ async function limparCadastrosDuplicadosCriadosPorVoltaAVolta(campeonato) {
 }
 
 async function reprocessarResumosDashboardCampeonatoAtual() {
-    if (!await pedirSenhaAdmin()) return;
     const campeonato = document.getElementById("imp_camp")?.value || "";
     const status = document.getElementById("statusImport");
-    if (!campeonato) return alert("Selecione o campeonato na tela de importação.");
+    if (!campeonato) { alert("Selecione um campeonato antes de reprocessar."); return; }
+    if (!await pedirSenhaAdmin()) return;
+    const botao = document.getElementById("btnReprocessarResumos");
+    if (botao) botao.disabled = true;
+    let etapaEmProcessamento = "";
 
     try {
         if (status) status.innerHTML = "⏳ Limpando vínculos antigos do Volta a volta e reprocessando resumos...";
         const duplicadosRemovidos = await limparCadastrosDuplicadosCriadosPorVoltaAVolta(campeonato);
         const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
         const etapasSnap = await campRef.collection("resultado_final").get();
-        const etapas = etapasSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
+        const etapas = etapasSnap.docs.map(doc => ({ ...(doc.data() || {}), docId: doc.id }))
+            .map(item => ({ ...item, etapa: FirestoreIntegrity.canonicalStageNumber(item.etapa || item.docId) }))
             .filter(item => item.etapa && item.dataCorrida)
             .sort((a, b) => Number(a.etapa || 0) - Number(b.etapa || 0));
 
@@ -6525,9 +6540,11 @@ async function reprocessarResumosDashboardCampeonatoAtual() {
 
         for (let i = 0; i < etapas.length; i += 1) {
             const item = etapas[i];
+            etapaEmProcessamento = item.etapa;
             if (status) status.innerHTML = `⏳ Reprocessando etapa ${htmlEscape(item.etapa)} (${i + 1}/${etapas.length})...`;
 
-            const resultRef = campRef.collection("resultado_final").doc(item.docId);
+            const etapaId = FirestoreIntegrity.requireFirestoreId(item.docId, "etapaId", { campeonatoId: campeonatoDocId, etapa: item.etapa });
+            const resultRef = campRef.collection("resultado_final").doc(etapaId);
             const possuiFonte = await dashboardEtapaPossuiFontePersistida({
                 campRef,
                 resultRef,
@@ -6558,11 +6575,13 @@ async function reprocessarResumosDashboardCampeonatoAtual() {
         }
 
         await recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonato);
-        if (status) status.innerHTML = `✅ Resumos persistidos atualizados: ${etapasReprocessadas} etapa(s). ${etapasOcultadas ? `${etapasOcultadas} etapa(s) sem arquivos foram ocultadas. ` : ""}${duplicadosRemovidos ? `${duplicadosRemovidos} cadastro(s) duplicado(s) antigo(s) do Volta a volta foram removidos. ` : ""}A tela inicial agora apenas consulta os resultados salvos.`;
+        if (status) status.innerHTML = `✅ Reprocessamento concluído. ${etapasReprocessadas} etapa(s) atualizada(s). ${etapasOcultadas ? `${etapasOcultadas} etapa(s) sem arquivos foram ocultadas. ` : ""}${duplicadosRemovidos ? `${duplicadosRemovidos} cadastro(s) duplicado(s) antigo(s) do Volta a volta foram removidos.` : ""}`;
         await inicializarRankingFirestore();
     } catch (e) {
         console.error(e);
-        if (status) status.innerHTML = `❌ Erro ao reprocessar resumos: ${htmlEscape(e.message || e)}`;
+        if (status) status.innerHTML = `❌ Erro ao reprocessar Etapa ${htmlEscape(etapaEmProcessamento || "não identificada")}: ${htmlEscape(e.message || e)}`;
+    } finally {
+        if (botao) botao.disabled = false;
     }
 }
 window.reprocessarResumosDashboardCampeonatoAtual = reprocessarResumosDashboardCampeonatoAtual;
