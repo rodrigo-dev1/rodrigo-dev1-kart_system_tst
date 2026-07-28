@@ -5054,42 +5054,22 @@ function dashboardCanonicalizarVoltasEtapa(voltas, corrida, classificacao, pilot
         ? pilotosCampeonato
         : (Array.isArray(pilotosCampeonato?.pilotos) ? pilotosCampeonato.pilotos : []);
 
-    const candidatos = [
-        ...(corrida || []),
-        ...(classificacao || []),
-        ...(vinculosVolta || []),
-        ...pilotosLista
-    ];
-    const porId = new Map();
-    const porNome = new Map();
-    const porKartLista = new Map();
-
-    candidatos.forEach(c => {
-        const id = getDriverId(c);
-        const nome = normalizarNomeComparacao(c?.driver_name || c?.nome || "");
-        const kart = normalizarKartComparacao(c?.kart_numero || c?.kart || "");
-        if (id && !porId.has(id)) porId.set(id, c);
-        if (nome && !porNome.has(nome)) porNome.set(nome, c);
-        if (kart) {
-            if (!porKartLista.has(kart)) porKartLista.set(kart, []);
-            porKartLista.get(kart).push(c);
-        }
-    });
+    const stageDriverMap = DriverIdentity.createStageDriverMap(corrida || []);
 
     return (voltas || []).map(v => {
-        const id = getDriverId(v);
-        const nome = normalizarNomeComparacao(v?.driver_name || v?.nome || "");
-        const kart = normalizarKartComparacao(v?.kart_numero || v?.kart || "");
-        let match = id ? porId.get(id) : null;
-        if (!match && nome) match = porNome.get(nome) || null;
-        if (!match && kart) {
-            const porKart = porKartLista.get(kart) || [];
-            const idsUnicos = new Set(porKart.map(c => String(c?.driver_id || c?.id_piloto || c?.piloto_doc_id || "").trim()).filter(Boolean));
-            if (porKart.length === 1 || idsUnicos.size === 1) match = porKart[0] || null;
+        const resolution = DriverIdentity.resolveStageLapParticipant(v, stageDriverMap, vinculosVolta);
+        const match = resolution.resolved;
+        if (!match) {
+            console.warn("UNRESOLVED VOLTA A VOLTA DRIVER", {
+                kart: resolution.kartNumber,
+                rawName: String(v.driver_name || v.nome || ""),
+                normalizedName: resolution.normalizedName,
+                possibleStageDrivers: (stageDriverMap.byKartNumber.get(resolution.kartNumber) || []).map(p => ({ driverId: p.driverId, name: p.name }))
+            });
+            return { ...v, driver_id_arquivo: resolution.fileId, isChampionship: false, identityResolution: "unresolved" };
         }
-        if (!match) return v;
 
-        const driverId = getDriverId(match) || id;
+        const driverId = getDriverId(match);
         const driverName = String(match.driver_name || match.nome || "").trim() || String(v.driver_name || "").trim();
 
         return {
@@ -5100,6 +5080,8 @@ function dashboardCanonicalizarVoltasEtapa(voltas, corrida, classificacao, pilot
             id_piloto: driverId,
             driver_name: driverName,
             nome: driverName,
+            isChampionship: stageDriverMap.ids.has(driverId),
+            identityResolution: resolution.resolution,
             piloto_doc_id: match.piloto_doc_id || match.pilotoVinculadoDocId || ""
         };
     });
@@ -5702,13 +5684,14 @@ function dashboardTabelaEtapa(stat) {
             <div class="dashboard-section-title" style="margin-top:0;"><h3>🏁 Resultado da Etapa</h3><span>${stat.corrida.length} piloto(s)</span></div>
             <div class="dashboard-table-wrap">
                 <table class="dashboard-table">
-                    <tr><th class="dashboard-sticky-identity">Pos&nbsp;&nbsp;Piloto</th><th>Nome</th><th>Grid</th><th>Kart</th><th>Voltas</th><th>Melhor Volta</th><th>Total</th><th>Pts</th></tr>
+                    <tr><th class="stage-result-sticky-pos">Pos</th><th>Piloto</th><th>Nome</th><th>Grid</th><th>Kart</th><th>Voltas</th><th>Melhor Volta</th><th>Total</th><th>Pts</th></tr>
                     ${stat.corrida.map((p, idx) => {
                         const grid = classMap.get(dashboardPilotoKey(p))?.pos || "-";
                         const pts = Number(p.pontos || 0) + Number(p.melhor_tempo_ponto || 0);
                         const medalha = ["🥇", "🥈", "🥉"][idx] || "";
                         return `<tr class="${idx < 3 ? `stage-result-top stage-result-top-${idx + 1}` : ""}">
-                            <td class="dashboard-sticky-identity"><div class="dashboard-identity-cell"><strong>${medalha} ${idx + 1}º</strong>${dashboardMiniAvatar(p)}</div></td>
+                            <td class="stage-result-sticky-pos"><strong>${medalha} ${idx + 1}º</strong></td>
+                            <td>${dashboardMiniAvatar(p)}</td>
                             <td><strong>${htmlEscape(dashboardNomePiloto(p))}</strong></td>
                             <td>${grid}</td>
                             <td>${htmlEscape(p.kart_numero || "-")}</td>
@@ -5897,7 +5880,7 @@ async function renderRankingFirestore() {
    apenas consulta dashboardResumo (etapa) e dashboardGeral (campeonato).
    ============================================================================ */
 
-const DASHBOARD_RESUMO_VERSION = 3;
+const DASHBOARD_RESUMO_VERSION = 4;
 
 function dashboardPilotoPersistivel(item) {
     if (!item) return null;
@@ -6257,8 +6240,9 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         pilotosCampeonato,
         vinculosVolta
     );
-    const voltas = voltasCanonicas.filter(item => linhaPertenceAoCampeonatoRanking(item, "", pilotosCampeonato));
-    const etapaObj = { docId: resultadoDocId, ref: resultadoDocRef, meta, corrida, classificacao, voltas };
+    // Preserve the complete race. Championship membership is persisted as a
+    // flag and filtering is exclusively a presentation concern.
+    const etapaObj = { docId: resultadoDocId, ref: resultadoDocRef, meta, corrida, classificacao, voltas: voltasCanonicas };
     const stat = dashboardEstatisticasEtapa(etapaObj);
     const resumo = dashboardSerializarEstatisticasEtapa(stat, {
         resultado_final: meta.resultadoFinalResumo?.idImportacao || "",
@@ -6304,13 +6288,20 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     }
     const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
     const idsOficiais = pilotosLista.map(getDriverId).filter(Boolean);
-    const analytics = KartAnalytics.processarVoltasEtapa(voltas, idsOficiais);
+    const analytics = KartAnalytics.processarVoltasEtapa(voltas, pilotosLista);
     const participantes = new Map();
     voltas.forEach(v => {
         const id = String(v.driver_id || normalizarNomeComparacao(v.driver_name));
         if (!participantes.has(id)) participantes.set(id, { driver_id: String(v.driver_id || ""), driver_name: v.driver_name || id, kart_numero: v.kart_numero || "", isChampionship: idsOficiais.includes(normalizarDriverId(v.driver_id)) });
     });
-    await analyticsRef.set(toFirestoreSafe({ ...analytics, available: true, fonte: fonte || {}, processedAt: new Date().toISOString() }));
+    const resolvedIds = new Set(voltas.map(v => normalizeDriverId(v.driver_id)).filter(id => idsOficiais.includes(id)));
+    const analyticsValidation = {
+        resultDrivers: idsOficiais.length,
+        resolvedChampionshipDrivers: resolvedIds.size,
+        unresolvedDrivers: pilotosLista.filter(p => !resolvedIds.has(getDriverId(p))).map(p => ({ driverId: getDriverId(p), name: DriverIdentity.getDriverName(p), kartNumber: p.kart_numero || "" }))
+    };
+    console.info("ANALYTICS STAGE VALIDATION", analyticsValidation);
+    await analyticsRef.set(toFirestoreSafe({ ...analytics, analyticsValidation, available: true, fonte: fonte || {}, processedAt: new Date().toISOString() }));
     const ops = [];
     participantes.forEach((p, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("participantes_etapa").doc(normalizarDocId(id)), payload: p }));
     const porPiloto = new Map();
@@ -6355,7 +6346,7 @@ async function carregarAnalyticsEtapa(resultadoDocRef) {
         championshipDriverIds: [...oficiais.ids],
         championshipDriverNames: [...oficiais.nomesLegados],
         stageResultDrivers: resultadoRows,
-        ultrapassagensCampeonato: KartAnalytics.calcularUltrapassagens(snapshots, true),
+        ultrapassagensCampeonato: data.ultrapassagensCampeonato || KartAnalytics.calcularUltrapassagens(snapshots, true, data.participants || []),
         ultrapassagensGeral: data.ultrapassagensGeral || KartAnalytics.calcularUltrapassagens(snapshots, false)
     };
 }
@@ -6655,19 +6646,15 @@ async function renderAnalyticsEtapa(resultadoDocRef) {
 }
 function renderRegularidadeChart() {
     const alvo = document.getElementById("regularidadeChart");
-    const oficiais = new Set((ETAPA_ANALYTICS_ATUAL?.championshipDriverIds || []).map(normalizarDriverId));
-    const nomesLegados = new Set(ETAPA_ANALYTICS_ATUAL?.championshipDriverNames || []);
-    const items = (ETAPA_ANALYTICS_ATUAL?.regularidade || []).filter(i => {
-        const driverId = normalizarDriverId(i.driver_id || i.id_piloto);
-        const oficial = driverId ? oficiais.has(driverId) : nomesLegados.has(normalizarNomeComparacao(i.driver_name || i.nome || ""));
-        return oficial && Number.isFinite(Number(i.regularidade));
-    }).sort((a,b) => a.regularidade-b.regularidade);
+    const championshipItems = (ETAPA_ANALYTICS_ATUAL?.regularidade || []).filter(i => i.isChampionship === true);
+    const items = championshipItems.filter(i => i.status === "ok" && Number.isFinite(Number(i.regularidade))).sort((a,b) => a.regularidade-b.regularidade);
+    const insufficient = championshipItems.filter(i => i.status !== "ok" || !Number.isFinite(Number(i.regularidade)));
     if (!alvo) return;
-    if (!items.length) { alvo.innerHTML = `<div class="analytics-state">Sem voltas limpas suficientes para os pilotos do campeonato.</div>`; return; }
+    if (!items.length) { alvo.innerHTML = insufficient.map(i => `<div class="metric-row"><span>${htmlEscape(getDriverShortName(i))}</span><b>Sem dados suficientes</b></div>`).join("") || `<div class="analytics-state">Sem voltas limpas suficientes para os pilotos do campeonato.</div>`; return; }
     const valores = items.map(i => Number(i.regularidade)).sort((a,b)=>a-b);
     const quartil = q => valores[Math.min(valores.length - 1, Math.floor((valores.length - 1) * q))];
     const q1=quartil(.25), q2=quartil(.5), q3=quartil(.75), max=Math.max(...valores, .001);
-    alvo.innerHTML = `<div class="regularity-zones">Alta ≤${q1.toFixed(3)}s · Boa ≤${q2.toFixed(3)}s · Média ≤${q3.toFixed(3)}s · Baixa &gt;${q3.toFixed(3)}s</div>` + items.map((i,idx) => `<button class="metric-row" onclick="abrirDetalheRegularidade(${idx})" title="${htmlEscape(getDriverFullDisplayName(i))} | Regularidade ±${Number(i.regularidade).toFixed(3)}s | Pace ${Number(i.pace).toFixed(3)}s | Melhor ${Number(i.bestLap).toFixed(3)}s | Limpas ${i.cleanLaps}/${i.totalLaps}"><span>${htmlEscape(getDriverShortName(i))}</span><i style="width:${Math.max(3, i.regularidade/max*100)}%;background:${i.regularidade<=q1?'#36c98f':i.regularidade<=q2?'#5ca8ff':i.regularidade<=q3?'#ffca5c':'#ff6b6b'}"></i><b>±${Number(i.regularidade).toFixed(3)}s</b></button>`).join("");
+    alvo.innerHTML = `<div class="regularity-zones">Alta ≤${q1.toFixed(3)}s · Boa ≤${q2.toFixed(3)}s · Média ≤${q3.toFixed(3)}s · Baixa &gt;${q3.toFixed(3)}s</div>` + items.map((i,idx) => `<button class="metric-row" onclick="abrirDetalheRegularidade(${idx})" title="${htmlEscape(getDriverFullDisplayName(i))} | Regularidade ±${Number(i.regularidade).toFixed(3)}s | Pace ${Number(i.pace).toFixed(3)}s | Melhor ${Number(i.bestLap).toFixed(3)}s | Limpas ${i.cleanLaps}/${i.totalLaps}"><span>${htmlEscape(getDriverShortName(i))}</span><i style="width:${Math.max(3, i.regularidade/max*100)}%;background:${i.regularidade<=q1?'#36c98f':i.regularidade<=q2?'#5ca8ff':i.regularidade<=q3?'#ffca5c':'#ff6b6b'}"></i><b>±${Number(i.regularidade).toFixed(3)}s</b></button>`).join("") + insufficient.map(i => `<div class="metric-row"><span>${htmlEscape(getDriverShortName(i))}</span><b>Sem dados suficientes</b></div>`).join("");
     alvo._sortedItems = items;
 }
 function abrirDetalheRegularidade(index) {

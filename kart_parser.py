@@ -100,13 +100,13 @@ def parse_volta_a_volta(html: str, nome_arquivo: str = "arquivo.html") -> list[d
     parser.feed(html)
     piloto: Optional[dict] = None
     voltas: list[dict] = []
-    header_re = re.compile(r"^(\d+)\s*-\s*\[(\d+)\]\s*(.*?)(?:\s*-\s*([^\-]+))?$")
+    header_re = re.compile(r"^(\d+)\s*-\s*(?:\[(\d+)\]\s*)?(.*?)(?:\s*-\s*([^\-]+))?$")
 
     for row in parser.rows:
         valores = [cell[0] for cell in row]
         if len(row) == 1 and row[0][1]:
             match = header_re.match(valores[0])
-            piloto = ({"kart_numero": match.group(1).zfill(3), "driver_id": match.group(2),
+            piloto = ({"kart_numero": match.group(1).zfill(3), "driver_id": match.group(2) or "",
                        "driver_name": match.group(3).strip(), "classe": (match.group(4) or "").strip()}
                       if match else None)
             continue
@@ -122,10 +122,11 @@ def parse_volta_a_volta(html: str, nome_arquivo: str = "arquivo.html") -> list[d
 
     # Detecta a virada comparando eventos na ordem cronológica de cada piloto;
     # horários abreviados após 00:00 são segundos desde a nova meia-noite.
-    for driver_id in {v["driver_id"] for v in voltas}:
+    participant_keys = {(v["driver_id"] or f'{v["kart_numero"]}:{v["driver_name"]}') for v in voltas}
+    for participant_key in participant_keys:
         anteriores = -1.0
         dia = 0
-        for volta in sorted((v for v in voltas if v["driver_id"] == driver_id), key=lambda v: v["volta"]):
+        for volta in sorted((v for v in voltas if (v["driver_id"] or f'{v["kart_numero"]}:{v["driver_name"]}') == participant_key), key=lambda v: v["volta"]):
             atual = hora_corrida_para_segundos(volta["hora_dia"])
             if atual is None:
                 volta["elapsed_time"] = None
