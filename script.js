@@ -4929,13 +4929,28 @@ function dashboardPilotoKey(item) {
     return nome ? `nome:${nome}` : "";
 }
 
+function getDriverFullDisplayName(driver) {
+    const original = typeof driver === "string" ? driver : (driver?.driver_name || driver?.nome || driver?.piloto || "");
+    const limpo = String(original || "")
+        .replace(/^\s*\d+\s*-\s*/u, "")
+        .replace(/\[\s*[^\]]+\s*\]/gu, " ")
+        .replace(/(?:\s*-\s*)?\bRENTAL\b\s*$/giu, "")
+        .replace(/^\s*-+|-+\s*$/gu, "")
+        .replace(/\s+/gu, " ").trim();
+    return limpo || "-";
+}
+
+function getDriverShortName(driver) {
+    return getDriverFullDisplayName(driver).split(/\s+/u).slice(0, 2).join(" ");
+}
+
 function dashboardNomePiloto(item) {
-    return String(item?.driver_name || item?.nome || item?.piloto || "-").trim() || "-";
+    return getDriverFullDisplayName(item);
 }
 
 function dashboardCadastroPiloto(item) {
     const id = String(item?.driver_id || item?.id_piloto || item?.driverId || "").trim();
-    const nome = normalizarNomeComparacao(dashboardNomePiloto(item));
+    const nome = normalizarNomeComparacao(item?.driver_name || item?.nome || item?.piloto || "");
 
     return DB.pilotos.find(p => {
         const pid = String(p.id_piloto || p.driver_id || p.id || "").trim();
@@ -5653,8 +5668,9 @@ function dashboardTabelaGeral(ranking, geral) {
                     <tr><th>Pos</th><th>Piloto</th><th>Pts</th><th>Vit</th><th>Pódios</th><th>Poles</th><th>MV</th></tr>
                     ${ranking.map((p, idx) => {
                         const key = dashboardPilotoKey(p);
-                        return `<tr>
-                            <td><strong>${idx + 1}º</strong></td>
+                        const medalha = ["🥇", "🥈", "🥉"][idx] || "";
+                        return `<tr class="${idx < 3 ? `stage-result-top stage-result-top-${idx + 1}` : ""}">
+                            <td><strong>${medalha} ${idx + 1}º</strong></td>
                             <td><div class="dashboard-driver-cell">${dashboardMiniAvatar(p)}<strong>${htmlEscape(dashboardNomePiloto(p))}</strong></div></td>
                             <td><strong>${Number(p.pontos_total || 0)}</strong></td>
                             <td>${geral.vitorias.get(key)?.total || 0}</td>
@@ -5680,8 +5696,9 @@ function dashboardTabelaEtapa(stat) {
                     ${stat.corrida.map((p, idx) => {
                         const grid = classMap.get(dashboardPilotoKey(p))?.pos || "-";
                         const pts = Number(p.pontos || 0) + Number(p.melhor_tempo_ponto || 0);
-                        return `<tr>
-                            <td><strong>${idx + 1}º</strong></td>
+                        const medalha = ["🥇", "🥈", "🥉"][idx] || "";
+                        return `<tr class="${idx < 3 ? `stage-result-top stage-result-top-${idx + 1}` : ""}">
+                            <td><strong>${medalha} ${idx + 1}º</strong></td>
                             <td><div class="dashboard-driver-cell">${dashboardMiniAvatar(p)}<strong>${htmlEscape(dashboardNomePiloto(p))}</strong></div></td>
                             <td>${grid}</td>
                             <td>${htmlEscape(p.kart_numero || "-")}</td>
@@ -5835,8 +5852,6 @@ async function renderDashboardCampeonato() {
             ${dashboardHero(payload, ranking, stat)}
             <div class="dashboard-section-title"><h3>⭐ Destaques da Etapa</h3><span>estatísticas da corrida selecionada</span></div>
             <div class="dashboard-cards">${dashboardCardsEtapa(stat)}</div>
-            <div class="dashboard-section-title"><h3>🥇 Pódio da Etapa</h3><span>resultado final</span></div>
-            ${dashboardPodium(stat.podium, false)}
             ${dashboardTabelaEtapa(stat)}
             <div class="dashboard-note">As posições ganhas volta a volta são uma estimativa baseada na ordem de passagem registrada no arquivo. Quando o Volta a volta não está salvo com conteúdo, esses cartões aparecem sem dados, mas resultado, pole e melhor volta continuam disponíveis.</div>
         `;
@@ -6542,8 +6557,6 @@ async function renderDashboardCampeonato() {
             ${aviso}
             <div class="dashboard-section-title"><h3>⭐ Destaques da Etapa</h3><span>dados pré-calculados e persistidos</span></div>
             <div class="dashboard-cards">${dashboardCardsEtapa(stat)}</div>
-            <div class="dashboard-section-title"><h3>🥇 Pódio da Etapa</h3><span>resultado final</span></div>
-            ${dashboardPodium(stat.podium, false)}
             ${dashboardTabelaEtapa(stat)}
             <div class="dashboard-note">Esta tela não reprocessa os arquivos. As métricas foram calculadas no momento da importação e estão persistidas em resultado_final/${htmlEscape(etapa.docId)}/dashboardResumo.</div>
             <div id="etapaAnalyticsContent"></div>
@@ -6561,6 +6574,7 @@ let RACE_PLAY_TIMER = null;
 let RACE_SNAPSHOT_INDEX = 0;
 let ETAPA_ANALYTICS_ATUAL = null;
 let OVERTAKE_MODE = "campeonato";
+let RACE_MODE = "campeonato";
 
 function analyticsHelp(texto) {
     return `<span class="analytics-help" title="${htmlEscape(texto)}" aria-label="${htmlEscape(texto)}">?</span>`;
@@ -6580,22 +6594,23 @@ async function renderAnalyticsEtapa(resultadoDocRef) {
         RACE_SNAPSHOT_INDEX = 0;
         alvo.innerHTML = `
           <section class="analytics-card"><h3>📊 Regularidade dos Pilotos ${analyticsHelp("Indica o quanto os tempos do piloto variam entre as voltas limpas. Quanto menor o valor, maior a regularidade.")}</h3><div id="regularidadeChart" class="bar-chart"></div></section>
-          <section class="analytics-card"><h3>🏁 Evolução da Corrida — Volta a Volta ${analyticsHelp("Mostra a evolução das posições ao longo da corrida e a distância entre os pilotos.")}</h3><div class="race-controls"><button onclick="voltaAnterior()">‹</button><strong id="raceLapLabel"></strong><button onclick="proximaVolta()">›</button><button id="racePlay" onclick="playRaceAnimation()">▶ Reproduzir</button></div><div id="raceSnapshot"></div></section>
+          <section class="analytics-card"><h3>🏁 Evolução da Corrida — Volta a Volta ${analyticsHelp("Mostra a evolução das posições ao longo da corrida e a distância entre os pilotos.")}</h3><div class="analytics-toggle race-filter"><button id="raceChamp" onclick="setRaceMode('campeonato')">Pilotos do Campeonato</button><button id="raceAll" onclick="setRaceMode('geral')">Geral da Corrida</button></div><div class="race-controls"><button onclick="voltaAnterior()" aria-label="Volta anterior">‹</button><strong id="raceLapLabel"></strong><button id="racePlay" onclick="playRaceAnimation()">▶ Reproduzir</button><button onclick="proximaVolta()" aria-label="Próxima volta">›</button></div><div id="raceSnapshot" class="race-scroll"></div></section>
           <section class="analytics-card"><h3>🔄 Ultrapassagens por Piloto ${analyticsHelp("Estimativa baseada nas mudanças de posição observadas entre voltas consecutivas.")}</h3><div class="analytics-toggle"><button id="overtakeChamp" onclick="renderUltrapassagensChart('campeonato')">Pilotos do Campeonato</button><button id="overtakeAll" onclick="renderUltrapassagensChart('geral')">Geral da Corrida</button></div><div id="overtakeKpis"></div><div id="overtakeChart" class="bar-chart"></div></section>`;
-        renderRegularidadeChart(); renderRaceSnapshot(); renderUltrapassagensChart("campeonato");
+        RACE_MODE = "campeonato"; renderRegularidadeChart(); renderRaceSnapshot(); renderUltrapassagensChart("campeonato");
     } catch (e) {
         console.error(e); alvo.innerHTML = `<div class="analytics-state error">Erro ao consultar análises: ${htmlEscape(e.message || e)}</div>`;
     }
 }
 function renderRegularidadeChart() {
     const alvo = document.getElementById("regularidadeChart");
-    const items = (ETAPA_ANALYTICS_ATUAL?.regularidade || []).filter(i => Number.isFinite(Number(i.regularidade))).sort((a,b) => a.regularidade-b.regularidade);
+    const oficiais = new Set((ETAPA_ANALYTICS_ATUAL?.snapshots || []).flatMap(s => s.positions || []).filter(p => p.isChampionship).map(p => String(p.driver_id)));
+    const items = (ETAPA_ANALYTICS_ATUAL?.regularidade || []).filter(i => oficiais.has(String(i.driver_id)) && Number.isFinite(Number(i.regularidade))).sort((a,b) => a.regularidade-b.regularidade);
     if (!alvo) return;
-    if (!items.length) { alvo.innerHTML = `<div class="analytics-state">Sem voltas limpas suficientes.</div>`; return; }
+    if (!items.length) { alvo.innerHTML = `<div class="analytics-state">Sem voltas limpas suficientes para os pilotos do campeonato.</div>`; return; }
     const valores = items.map(i => Number(i.regularidade)).sort((a,b)=>a-b);
     const quartil = q => valores[Math.min(valores.length - 1, Math.floor((valores.length - 1) * q))];
     const q1=quartil(.25), q2=quartil(.5), q3=quartil(.75), max=Math.max(...valores, .001);
-    alvo.innerHTML = `<div class="regularity-zones">Alta ≤${q1.toFixed(3)}s · Boa ≤${q2.toFixed(3)}s · Média ≤${q3.toFixed(3)}s · Baixa &gt;${q3.toFixed(3)}s</div>` + items.map((i,idx) => `<button class="metric-row" onclick="abrirDetalheRegularidade(${idx})" title="${htmlEscape(i.driver_name)} | Regularidade ±${Number(i.regularidade).toFixed(3)}s | Pace ${Number(i.pace).toFixed(3)}s | Melhor ${Number(i.bestLap).toFixed(3)}s | Limpas ${i.cleanLaps}/${i.totalLaps}"><span>${htmlEscape(i.driver_name)}</span><i style="width:${Math.max(3, i.regularidade/max*100)}%;background:${i.regularidade<=q1?'#36c98f':i.regularidade<=q2?'#5ca8ff':i.regularidade<=q3?'#ffca5c':'#ff6b6b'}"></i><b>±${Number(i.regularidade).toFixed(3)}s</b></button>`).join("");
+    alvo.innerHTML = `<div class="regularity-zones">Alta ≤${q1.toFixed(3)}s · Boa ≤${q2.toFixed(3)}s · Média ≤${q3.toFixed(3)}s · Baixa &gt;${q3.toFixed(3)}s</div>` + items.map((i,idx) => `<button class="metric-row" onclick="abrirDetalheRegularidade(${idx})" title="${htmlEscape(getDriverFullDisplayName(i))} | Regularidade ±${Number(i.regularidade).toFixed(3)}s | Pace ${Number(i.pace).toFixed(3)}s | Melhor ${Number(i.bestLap).toFixed(3)}s | Limpas ${i.cleanLaps}/${i.totalLaps}"><span>${htmlEscape(getDriverShortName(i))}</span><i style="width:${Math.max(3, i.regularidade/max*100)}%;background:${i.regularidade<=q1?'#36c98f':i.regularidade<=q2?'#5ca8ff':i.regularidade<=q3?'#ffca5c':'#ff6b6b'}"></i><b>±${Number(i.regularidade).toFixed(3)}s</b></button>`).join("");
     alvo._sortedItems = items;
 }
 function abrirDetalheRegularidade(index) {
@@ -6603,18 +6618,32 @@ function abrirDetalheRegularidade(index) {
     const grid = Number(ETAPA_ANALYTICS_ATUAL.gridPace);
     const propria = lap => lap.volta===1?'⚪ Não Classificada':lap.isBest?'🏆 Mais Rápida':!lap.clean?'🔴 Lenta / Fora da janela':lap.tempo<item.pace-item.regularidade?'🟢 Rápida':lap.tempo>item.pace+item.regularidade?'🔴 Lenta':'🔵 Normal';
     const compGrid = lap => { if (!Number.isFinite(grid)||!lap.tempo) return '-'; const d=(lap.tempo-grid)/grid; return d<=-.03?'Muito Acima da Média':d<=-.01?'Acima da Média':d<.01?'Média':d<.03?'Abaixo da Média':'Muito Abaixo da Média'; };
-    const overlay=document.createElement('div'); overlay.className='analytics-modal'; overlay.innerHTML=`<div class="analytics-modal-box"><button class="modal-close">×</button><h2>${htmlEscape(item.driver_name)}</h2><p>As voltas são comparadas com a melhor volta do piloto (${item.bestLap.toFixed(3)}s) e com a média do grid (${Number.isFinite(grid)?grid.toFixed(3):'-'}s).</p><p><strong>Regularidade:</strong> ±${item.regularidade.toFixed(3)}s · <strong>Pace:</strong> ${item.pace.toFixed(3)}s</p><p class="hint">Voltas limpas: sem a volta 1 e sem voltas acima de 5% da melhor volta.</p><div class="dashboard-table-wrap"><table><tr><th>Volta</th><th>Tempo (s)</th><th>Comparação Própria</th><th>Comparação com o Grid</th></tr>${item.laps.map(l=>`<tr><td>${l.volta}</td><td>${l.tempo?.toFixed(3)||'-'}</td><td>${propria(l)}</td><td>${compGrid(l)}</td></tr>`).join('')}</table></div></div>`; document.body.appendChild(overlay); overlay.querySelector('.modal-close').onclick=()=>overlay.remove(); overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};
+    const overlay=document.createElement('div'); overlay.className='analytics-modal'; overlay.innerHTML=`<div class="analytics-modal-box"><button class="modal-close">×</button><h2>${htmlEscape(getDriverFullDisplayName(item))}</h2><p>As voltas são comparadas com a melhor volta do piloto (${item.bestLap.toFixed(3)}s) e com a média do grid (${Number.isFinite(grid)?grid.toFixed(3):'-'}s).</p><p><strong>Regularidade:</strong> ±${item.regularidade.toFixed(3)}s · <strong>Pace:</strong> ${item.pace.toFixed(3)}s</p><p class="hint">Voltas limpas: sem a volta 1 e sem voltas acima de 5% da melhor volta.</p><div class="dashboard-table-wrap"><table><tr><th>Volta</th><th>Tempo (s)</th><th>Comparação Própria</th><th>Comparação com o Grid</th></tr>${item.laps.map(l=>`<tr><td>${l.volta}</td><td>${l.tempo?.toFixed(3)||'-'}</td><td>${propria(l)}</td><td>${compGrid(l)}</td></tr>`).join('')}</table></div></div>`; document.body.appendChild(overlay); overlay.querySelector('.modal-close').onclick=()=>overlay.remove(); overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};
+}
+function setRaceMode(mode) {
+    RACE_MODE = mode === "geral" ? "geral" : "campeonato";
+    document.getElementById("raceChamp")?.classList.toggle("selected", RACE_MODE === "campeonato");
+    document.getElementById("raceAll")?.classList.toggle("selected", RACE_MODE === "geral");
+    renderRaceSnapshot();
 }
 function renderRaceSnapshot() {
     const snaps=ETAPA_ANALYTICS_ATUAL?.snapshots||[], alvo=document.getElementById('raceSnapshot'), label=document.getElementById('raceLapLabel'); if(!alvo||!snaps.length)return;
     RACE_SNAPSHOT_INDEX=Math.max(0,Math.min(RACE_SNAPSHOT_INDEX,snaps.length-1)); const snap=snaps[RACE_SNAPSHOT_INDEX]; label.textContent=`VOLTA ${snap.numeroVolta} / ${snaps[snaps.length-1].numeroVolta}`;
-    alvo.innerHTML=snap.positions.map(p=>{const delta=p.positionDeltaOverall; const gap=p.positionOverall===1?'Líder':p.lapsBehindPreviousOverall?`+${p.lapsBehindPreviousOverall} volta(s)`: `+${Number(p.gapToPreviousOverall||0).toFixed(3)}s`; const champ=p.isChampionship&&p.positionChampionship>1?(p.lapsBehindPreviousChampionship?` · +${p.lapsBehindPreviousChampionship} volta(s) para ${htmlEscape(p.previousChampionshipName)}`:` · +${Number(p.gapToPreviousChampionship||0).toFixed(3)}s para ${htmlEscape(p.previousChampionshipName)}`):''; return `<div class="race-row"><b>P${p.positionOverall}</b><span class="race-track" style="width:${Math.max(35,100-p.positionOverall*3)}%"></span><span><strong>${htmlEscape(p.driver_name)}</strong><small>${gap}${champ}</small></span><em class="${delta>0?'gain':delta<0?'loss':''}">${RACE_SNAPSHOT_INDEX===0?'Largada':delta>0?`▲ +${delta}`:delta<0?`▼ ${delta}`:'= 0'}</em></div>`;}).join('');
+    document.getElementById("raceChamp")?.classList.toggle("selected", RACE_MODE === "campeonato"); document.getElementById("raceAll")?.classList.toggle("selected", RACE_MODE === "geral");
+    const positions=(snap.positions||[]).filter(p=>RACE_MODE==='geral'||p.isChampionship);
+    alvo.innerHTML=`<div class="race-table">${positions.map(p=>{const champ=RACE_MODE==='campeonato', pos=champ?p.positionChampionship:p.positionOverall, delta=champ?p.positionDeltaChampionship:p.positionDeltaOverall, laps=champ?p.lapsBehindPreviousChampionship:p.lapsBehindPreviousOverall, gapValue=champ?p.gapToPreviousChampionship:p.gapToPreviousOverall; const gap=pos===1?'Líder':laps?`+${laps} volta(s)`: `+${Number(gapValue||0).toFixed(3)}s`; const tooltip=`${getDriverFullDisplayName(p)} | Kart: ${p.kart_numero||'-'} | Posição: P${pos} | Gap: ${gap}`; return `<div class="race-row" title="${htmlEscape(tooltip)}"><b class="race-position">P${pos}</b><span class="race-track-cell"><i class="race-track" style="width:${Math.max(12,100-pos*7)}%"></i></span><span class="race-driver"><strong>${htmlEscape(getDriverShortName(p))}</strong><small>${gap}</small></span><em class="${delta>0?'gain':delta<0?'loss':''}">${RACE_SNAPSHOT_INDEX===0?'Largada':delta>0?`▲ +${delta}`:delta<0?`▼ ${delta}`:'= 0'}</em></div>`;}).join('')}</div>`;
 }
 function proximaVolta(){const n=ETAPA_ANALYTICS_ATUAL?.snapshots?.length||0;if(n){RACE_SNAPSHOT_INDEX=Math.min(n-1,RACE_SNAPSHOT_INDEX+1);renderRaceSnapshot();}}
 function voltaAnterior(){RACE_SNAPSHOT_INDEX=Math.max(0,RACE_SNAPSHOT_INDEX-1);renderRaceSnapshot();}
 function playRaceAnimation(){if(RACE_PLAY_TIMER){pauseRaceAnimation();return;} const btn=document.getElementById('racePlay');if(btn)btn.textContent='⏸ Pausar';RACE_PLAY_TIMER=setInterval(()=>{const n=ETAPA_ANALYTICS_ATUAL?.snapshots?.length||0;if(RACE_SNAPSHOT_INDEX>=n-1){pauseRaceAnimation();return;}proximaVolta();},1000);}
 function pauseRaceAnimation(){if(RACE_PLAY_TIMER)clearInterval(RACE_PLAY_TIMER);RACE_PLAY_TIMER=null;const btn=document.getElementById('racePlay');if(btn)btn.textContent='▶ Reproduzir';}
-function renderUltrapassagensChart(mode='campeonato'){OVERTAKE_MODE=mode;const items=ETAPA_ANALYTICS_ATUAL?.[mode==='campeonato'?'ultrapassagensCampeonato':'ultrapassagensGeral']||[], alvo=document.getElementById('overtakeChart');if(!alvo)return;document.getElementById('overtakeChamp')?.classList.toggle('selected',mode==='campeonato');document.getElementById('overtakeAll')?.classList.toggle('selected',mode==='geral');const max=Math.max(1,...items.flatMap(i=>[i.feitas,i.tomadas]));alvo.innerHTML=items.map(i=>`<div class="metric-row overtake"><span>${htmlEscape(i.driver_name)}</span><i class="made" style="width:${i.feitas/max*45}%"></i><b>+${i.feitas}</b><i class="lost" style="width:${i.tomadas/max*45}%"></i><b>-${i.tomadas}</b></div>`).join('')||'<div class="analytics-state">Sem transições suficientes.</div>';const top=(field)=>[...items].sort((a,b)=>b[field]-a[field])[0];const k=document.getElementById('overtakeKpis');if(k&&items.length){const a=top('feitas'),b=top('tomadas'),c=top('saldo');k.innerHTML=`<div class="analytics-kpis"><span>Mais ultrapassou: <b>${htmlEscape(a.driver_name)} — ${a.feitas}</b></span><span>Mais sofreu: <b>${htmlEscape(b.driver_name)} — ${b.tomadas}</b></span><span>Melhor saldo: <b>${htmlEscape(c.driver_name)} — ${c.saldo>=0?'+':''}${c.saldo}</b></span></div>`;}}
+function renderUltrapassagensChart(mode='campeonato') {
+    OVERTAKE_MODE=mode; const items=ETAPA_ANALYTICS_ATUAL?.[mode==='campeonato'?'ultrapassagensCampeonato':'ultrapassagensGeral']||[], alvo=document.getElementById('overtakeChart'); if(!alvo)return;
+    document.getElementById('overtakeChamp')?.classList.toggle('selected',mode==='campeonato'); document.getElementById('overtakeAll')?.classList.toggle('selected',mode==='geral');
+    const max=Math.max(1,...items.flatMap(i=>[i.feitas,i.tomadas]));
+    alvo.innerHTML=items.length ? `<div class="overtake-head"><span>Piloto</span><span>Feitas</span><span>Tomadas</span></div>`+items.map(i=>`<div class="metric-row overtake" title="${htmlEscape(getDriverFullDisplayName(i))}"><span>${htmlEscape(getDriverShortName(i))}</span><span class="overtake-bar"><i class="made" style="width:${i.feitas/max*100}%"></i><b>+${i.feitas}</b></span><span class="overtake-bar"><i class="lost" style="width:${i.tomadas/max*100}%"></i><b>-${i.tomadas}</b></span></div>`).join('') : '<div class="analytics-state">Sem transições suficientes.</div>';
+    const top=field=>[...items].sort((a,b)=>b[field]-a[field])[0], k=document.getElementById('overtakeKpis'); if(k&&items.length){const a=top('feitas'),b=top('tomadas'),c=top('saldo');k.innerHTML=`<div class="analytics-kpis"><span>Mais ultrapassou: <b>${htmlEscape(getDriverShortName(a))} — ${a.feitas}</b></span><span>Mais sofreu: <b>${htmlEscape(getDriverShortName(b))} — ${b.tomadas}</b></span><span>Melhor saldo: <b>${htmlEscape(getDriverShortName(c))} — ${c.saldo>=0?'+':''}${c.saldo}</b></span></div>`;}
+}
 
 inicializarPreviewVoltaAVoltaJS();
 fetchData();
