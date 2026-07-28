@@ -194,6 +194,43 @@
         return !!name && (official?.legacyNames?.has(name) || false);
     }
 
+    // Filtro unico para qualquer visualizacao da etapa. Um ID presente (mesmo
+    // que desconhecido) nunca cai no fallback de nome: o fallback existe
+    // somente para registros legados que realmente nao possuem driver_id.
+    function filterStageChampionshipDrivers(rows, official) {
+        return (Array.isArray(rows) ? rows : []).filter(item => isChampionshipDriver(item, official));
+    }
+
+    // Regularidade e ultrapassagens precisam manter os pilotos oficiais mesmo
+    // quando o analytics antigo nao possui uma linha para um deles.
+    function reconcileStageChampionshipDrivers(rows, official, createMissing) {
+        const source = Array.isArray(rows) ? rows : [];
+        const filtered = filterStageChampionshipDrivers(source, official);
+        const byId = new Map(filtered.map(item => [getDriverId(item), item]).filter(([id]) => id));
+        const byName = new Map(filtered
+            .filter(item => !getDriverId(item))
+            .map(item => [normalizeDriverName(getDriverName(item)), item])
+            .filter(([name]) => name));
+        return (official?.drivers || []).map(driver => {
+            const id = getDriverId(driver);
+            const match = (id && byId.get(id)) || (!id && byName.get(normalizeDriverName(getDriverName(driver))));
+            return match || (typeof createMissing === "function" ? createMissing(driver) : driver);
+        });
+    }
+
+    function compareDriverIdSets(officialRows, actualRows) {
+        const expected = new Set((officialRows || []).map(getDriverId).filter(Boolean));
+        const actual = new Set((actualRows || []).map(getDriverId).filter(Boolean));
+        return {
+            expectedCount: expected.size,
+            actualCount: actual.size,
+            expected: [...expected],
+            actual: [...actual],
+            missing: [...expected].filter(id => !actual.has(id)),
+            extra: [...actual].filter(id => !expected.has(id))
+        };
+    }
+
     function compareStageDriverIds(resultRows, snapshotRows, filteredRows) {
         const ids = rows => new Set((rows || []).map(getDriverId).filter(Boolean));
         const resultIds = ids(resultRows), snapshotIds = ids(snapshotRows), filteredIds = ids(filteredRows);
@@ -209,5 +246,5 @@
         };
     }
 
-    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getDriverName, cleanDriverDisplayName, getDriverDisplayName, getDriverShortDisplayName, driverKey, getStageReferenceRows, getStageChampionshipDrivers, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, compareStageDriverIds };
+    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getDriverName, cleanDriverDisplayName, getDriverDisplayName, getDriverShortDisplayName, driverKey, getStageReferenceRows, getStageChampionshipDrivers, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, filterStageChampionshipDrivers, reconcileStageChampionshipDrivers, compareDriverIdSets, compareStageDriverIds };
 }));

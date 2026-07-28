@@ -80,3 +80,33 @@ test("nome curto usa no maximo duas palavras e aceita campos legados", () => {
     assert.equal(identity.getDriverShortDisplayName({ name: "034 - CARLOS EDUARDO DA SILVA - RENTAL" }), "CARLOS EDUARDO");
     assert.equal(identity.getDriverDisplayName({ piloto_original: "[41938] LEONARDO LEMES" }), "LEONARDO LEMES");
 });
+
+test("filtro central prioriza driver_id e usa nome apenas quando o ID esta ausente", () => {
+    const oficiais = identity.getStageChampionshipDrivers([
+        { driver_id: "41938", driver_name: "LEONARDO LEMES" },
+        { driver_id: "231138", driver_name: "RODRIGO CRUZ" }
+    ]);
+    const rows = [
+        { driver_id: "41938", driver_name: "NOME IRRELEVANTE" },
+        { driver_id: "999", driver_name: "RODRIGO CRUZ" },
+        { driver_name: "050 - [231138] RODRIGO CRUZ - RENTAL" },
+        { driver_id: "888", driver_name: "EXTERNO" }
+    ];
+    const filtrados = identity.filterStageChampionshipDrivers(rows, oficiais);
+    assert.deepEqual(filtrados.map(row => identity.getDriverId(row) || identity.normalizeDriverName(identity.getDriverName(row))), ["41938", "RODRIGO CRUZ"]);
+});
+
+test("reconciliacao mantem exatamente todos os pilotos do resultado", () => {
+    const resultado = [
+        { driver_id: "1", driver_name: "COM ANALYTICS" },
+        { driver_id: "2", driver_name: "SEM ANALYTICS" }
+    ];
+    const oficiais = identity.getStageChampionshipDrivers(resultado);
+    const rows = [{ driver_id: "1", regularidade: 0.1 }, { driver_id: "9", regularidade: 0.2 }];
+    const reconciliados = identity.reconcileStageChampionshipDrivers(rows, oficiais, driver => ({ ...driver, status: "insufficient_data" }));
+    assert.deepEqual(reconciliados.map(identity.getDriverId), ["1", "2"]);
+    assert.equal(reconciliados[1].status, "insufficient_data");
+    assert.deepEqual(identity.compareDriverIdSets(resultado, reconciliados), {
+        expectedCount: 2, actualCount: 2, expected: ["1", "2"], actual: ["1", "2"], missing: [], extra: []
+    });
+});
