@@ -44,5 +44,22 @@ test("usa exatamente o resultado exibido quando a subcollection antiga esta parc
 
 test("ultrapassagens mantem participantes oficiais com zero", () => {
     const snapshots = [{ positions: [{ driver_id: "1", driver_name: "A", isChampionship: true, positionDeltaChampionship: 0, positionDeltaOverall: 0 }] }];
-    assert.deepEqual(analytics.calcularUltrapassagens(snapshots, true), [{ driver_id: "1", driver_name: "A", feitas: 0, tomadas: 0, saldo: 0 }]);
+    assert.deepEqual(analytics.calcularUltrapassagens(snapshots, true), [{ driver_id: "1", driver_name: "A", isChampionship: true, feitas: 0, tomadas: 0, saldo: 0 }]);
+});
+
+test("canonicaliza cabecalho sem driver_id pelo resultado final", () => {
+    const result = [{ driver_id: "XYZ", driver_name: "BRENO MANTOVANI", kart_numero: "041" }];
+    const map = identity.createStageDriverMap(result);
+    const resolution = identity.resolveStageLapParticipant({ driver_name: "BRENO MANTOVANI", kart_numero: 41 }, map);
+    assert.equal(resolution.resolved.driverId, "XYZ");
+    assert.equal(resolution.resolution, "unique_stage_name");
+});
+
+test("analytics preserva corrida completa e oficiais sem metrica ou ultrapassagem", () => {
+    const official = [{ driver_id: "1", driver_name: "OFICIAL COM VOLTA", isChampionship: true }, { driver_id: "2", driver_name: "OFICIAL SEM VOLTA", isChampionship: true }];
+    const laps = [{ driver_id: "1", driver_name: "OFICIAL COM VOLTA", isChampionship: true, volta: 1, volta_lider: 1, elapsed_time: 2, tempo_volta_segundos: 60 }, { driver_id: "9", driver_name: "EXTERNO", isChampionship: false, volta: 1, volta_lider: 1, elapsed_time: 1, tempo_volta_segundos: 59 }];
+    const result = analytics.processarVoltasEtapa(laps, official);
+    assert.deepEqual(result.snapshots[0].positions.map(p => p.positionOverall), [1, 2]);
+    assert.equal(result.regularidade.find(p => p.driver_id === "2").status, "insufficient_data");
+    assert.deepEqual(result.ultrapassagensCampeonato.map(p => p.driver_id).sort(), ["1", "2"]);
 });
