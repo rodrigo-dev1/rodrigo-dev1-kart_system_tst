@@ -264,8 +264,11 @@ function vinculosPiloto(p) {
 }
 
 function normalizarDriverId(driverId) {
-    if (driverId === undefined || driverId === null) return "";
-    return String(driverId).trim();
+    return DriverIdentity.normalizeDriverId(driverId);
+}
+
+function getDriverId(item) {
+    return DriverIdentity.getDriverId(item);
 }
 
 function pilotosDoCampeonato(campeonato) {
@@ -276,7 +279,7 @@ function pilotosDoCampeonato(campeonato) {
 // piloto; nomes são mantidos apenas para arquivos legados sem driver_id.
 function getChampionshipDrivers(campeonato) {
     const pilotos = pilotosDoCampeonato(campeonato).map(p => {
-        const driverId = normalizarDriverId(p.driver_id || p.id_piloto || p.id);
+        const driverId = getDriverId(p);
         const nome = String(p.driver_name || p.nome || "").trim();
         return { ...p, driver_id: driverId, id_piloto: driverId, driver_name: nome, nome };
     });
@@ -288,7 +291,7 @@ function getChampionshipDrivers(campeonato) {
 }
 
 function isChampionshipDriver(item, campeonatoDrivers) {
-    const driverId = normalizarDriverId(item?.driver_id || item?.id_piloto);
+    const driverId = getDriverId(item);
     if (driverId) return campeonatoDrivers?.ids?.has(driverId) || false;
     const nome = normalizarNomeComparacao(item?.driver_name || item?.nome || item?.piloto || "");
     return !!nome && (campeonatoDrivers?.nomesLegados?.has(nome) || false);
@@ -5062,7 +5065,7 @@ function dashboardCanonicalizarVoltasEtapa(voltas, corrida, classificacao, pilot
     const porKartLista = new Map();
 
     candidatos.forEach(c => {
-        const id = String(c?.driver_id || c?.id_piloto || "").trim();
+        const id = getDriverId(c);
         const nome = normalizarNomeComparacao(c?.driver_name || c?.nome || "");
         const kart = normalizarKartComparacao(c?.kart_numero || c?.kart || "");
         if (id && !porId.has(id)) porId.set(id, c);
@@ -5074,7 +5077,7 @@ function dashboardCanonicalizarVoltasEtapa(voltas, corrida, classificacao, pilot
     });
 
     return (voltas || []).map(v => {
-        const id = String(v?.driver_id || v?.id_piloto || "").trim();
+        const id = getDriverId(v);
         const nome = normalizarNomeComparacao(v?.driver_name || v?.nome || "");
         const kart = normalizarKartComparacao(v?.kart_numero || v?.kart || "");
         let match = id ? porId.get(id) : null;
@@ -5086,7 +5089,7 @@ function dashboardCanonicalizarVoltasEtapa(voltas, corrida, classificacao, pilot
         }
         if (!match) return v;
 
-        const driverId = String(match.driver_id || match.id_piloto || "").trim() || id;
+        const driverId = getDriverId(match) || id;
         const driverName = String(match.driver_name || match.nome || "").trim() || String(v.driver_name || "").trim();
 
         return {
@@ -6229,10 +6232,21 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         dataCorrida,
         resultadoDocId
     };
-    const pilotosCampeonato = await buscarPilotosDoCampeonatoRankingFirestore(campeonato);
-    const corrida = corridaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
-        .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId, pilotosCampeonato));
-    const classificacao = classificacaoSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
+    const pilotosCadastrados = await buscarPilotosDoCampeonatoRankingFirestore(campeonato);
+    const corridaCollection = corridaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const classificacaoCollection = classificacaoSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    // Usa literalmente a origem que hidrata "Resultado da Etapa". Analytics
+    // antigos podem ter apenas parte dos oficiais na subcollection, enquanto
+    // dashboardResumo.corrida preserva o resultado completo exibido (11 x 6).
+    const corrida = DriverIdentity.getStageReferenceRows(meta, corridaCollection, classificacaoCollection);
+    const oficiaisEtapa = DriverIdentity.getStageChampionshipDrivers(corrida, pilotosCadastrados.pilotos);
+    const pilotosCampeonato = {
+        pilotos: oficiaisEtapa.drivers,
+        ids: oficiaisEtapa.ids,
+        nomesLegados: oficiaisEtapa.legacyNames,
+        nomes: oficiaisEtapa.legacyNames
+    };
+    const classificacao = classificacaoCollection
         .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId, pilotosCampeonato));
     const voltaInfo = await dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVoltaAtual, nomeArquivoVoltaAtual, idImportacaoVoltaAtual);
     const vinculosVolta = vinculosVoltaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
@@ -6289,7 +6303,7 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         return null;
     }
     const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
-    const idsOficiais = pilotosLista.map(p => normalizarDriverId(p.driver_id || p.id_piloto || p.id)).filter(Boolean);
+    const idsOficiais = pilotosLista.map(getDriverId).filter(Boolean);
     const analytics = KartAnalytics.processarVoltasEtapa(voltas, idsOficiais);
     const participantes = new Map();
     voltas.forEach(v => {
@@ -6311,19 +6325,27 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
 }
 
 async function carregarAnalyticsEtapa(resultadoDocRef) {
-    const [snap, campSnap] = await Promise.all([
+    const [snap, campSnap, resultadoDocSnap, resultadoRowsSnap, classificacaoRowsSnap] = await Promise.all([
         resultadoDocRef.collection("analytics").doc("volta_a_volta_v1").get(),
-        resultadoDocRef.parent.parent.get()
+        resultadoDocRef.parent.parent.get(),
+        resultadoDocRef.get(),
+        resultadoDocRef.collection("pilotos_resultado").get(),
+        resultadoDocRef.collection("classificacao").get()
     ]);
     if (!snap.exists) return null;
     const data = snap.data() || {};
     const campData = campSnap.exists ? campSnap.data() || {} : {};
-    const oficiais = getChampionshipDrivers(campData.nome || campData.nome_exibicao || resultadoDocRef.parent.parent.id);
+    const cadastrados = getChampionshipDrivers(campData.nome || campData.nome_exibicao || resultadoDocRef.parent.parent.id);
+    const resultadoCollection = resultadoRowsSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const classificacaoCollection = classificacaoRowsSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const resultadoRows = DriverIdentity.getStageReferenceRows(resultadoDocSnap.data() || {}, resultadoCollection, classificacaoCollection);
+    const oficiaisEtapa = DriverIdentity.getStageChampionshipDrivers(resultadoRows, cadastrados.pilotos);
+    const oficiais = { ids: oficiaisEtapa.ids, nomesLegados: oficiaisEtapa.legacyNames };
     const snapshots = (data.snapshots || []).map(snapshot => ({
         ...snapshot,
         positions: (snapshot.positions || []).map(p => ({
             ...p,
-            driver_id: normalizarDriverId(p.driver_id || p.id_piloto),
+            driver_id: getDriverId(p),
             isChampionship: isChampionshipDriver(p, oficiais)
         }))
     }));
@@ -6332,6 +6354,7 @@ async function carregarAnalyticsEtapa(resultadoDocRef) {
         snapshots,
         championshipDriverIds: [...oficiais.ids],
         championshipDriverNames: [...oficiais.nomesLegados],
+        stageResultDrivers: resultadoRows,
         ultrapassagensCampeonato: KartAnalytics.calcularUltrapassagens(snapshots, true),
         ultrapassagensGeral: data.ultrapassagensGeral || KartAnalytics.calcularUltrapassagens(snapshots, false)
     };
@@ -6665,6 +6688,19 @@ function renderRaceSnapshot() {
     RACE_SNAPSHOT_INDEX=Math.max(0,Math.min(RACE_SNAPSHOT_INDEX,snaps.length-1)); const snap=snaps[RACE_SNAPSHOT_INDEX]; label.textContent=`VOLTA ${snap.numeroVolta} / ${snaps[snaps.length-1].numeroVolta}`;
     document.getElementById("raceChamp")?.classList.toggle("selected", RACE_MODE === "campeonato"); document.getElementById("raceAll")?.classList.toggle("selected", RACE_MODE === "geral");
     const positions=(snap.positions||[]).filter(p=>RACE_MODE==='geral'||p.isChampionship);
+    label.textContent += ` · ${positions.length} piloto(s)`;
+    if (RACE_MODE === "campeonato" && ETAPA_ANALYTICS_ATUAL?.stageResultDrivers?.length) {
+        const check = DriverIdentity.compareStageDriverIds(ETAPA_ANALYTICS_ATUAL.stageResultDrivers, snap.positions || [], positions);
+        console.info("Validação Pilotos do Campeonato", {
+            EXPECTED: check.expectedCount,
+            "VOLTA A VOLTA": check.lapCount,
+            "EXPECTED COM VOLTAS": check.expectedInLapCount,
+            EXIBIDOS: check.actualCount,
+            MISSING: check.missing,
+            UNEXPECTED: check.unexpected
+        });
+        if (check.missing.length || check.unexpected.length) console.warn("Inconsistência de pilotos da etapa", check);
+    }
     alvo.innerHTML=`<div class="race-table">${positions.map(p=>{const pos=p.positionOverall, delta=p.positionDeltaOverall, laps=p.lapsBehindPreviousOverall, gapValue=p.gapToPreviousOverall; const gap=pos===1?'Líder':laps?`+${laps} volta(s)`: `+${Number(gapValue||0).toFixed(3)}s`; const tooltip=`${getDriverFullDisplayName(p)} | Kart: ${p.kart_numero||'-'} | Posição: P${pos} | Gap: ${gap}`; return `<div class="race-row" title="${htmlEscape(tooltip)}"><b class="race-position">P${pos}</b><span class="race-track-cell"><i class="race-track" style="width:${Math.max(12,100-pos*7)}%"></i></span><span class="race-driver"><strong>${htmlEscape(getDriverShortName(p))}</strong><small>${gap}</small></span><em class="${delta>0?'gain':delta<0?'loss':''}">${RACE_SNAPSHOT_INDEX===0?'Largada':delta>0?`▲ +${delta}`:delta<0?`▼ ${delta}`:'= 0'}</em></div>`;}).join('')}</div>`;
 }
 function proximaVolta(){const n=ETAPA_ANALYTICS_ATUAL?.snapshots?.length||0;if(n){RACE_SNAPSHOT_INDEX=Math.min(n-1,RACE_SNAPSHOT_INDEX+1);renderRaceSnapshot();}}
