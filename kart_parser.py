@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+from html.parser import HTMLParser
 from io import StringIO
 from typing import Optional
 
 import pandas as pd
-from js import document, window
-from pyodide.ffi.wrappers import add_event_listener
+if sys.platform == "emscripten":
+    from js import document, window
+    from pyodide.ffi.wrappers import add_event_listener
 
 COLUNAS_RENAME = {
     "Pos": "posicao_final",
@@ -42,6 +45,102 @@ PONTUACAO_PADRAO = {
 }
 
 LAST_DF: Optional[pd.DataFrame] = None
+
+
+class _TabelaVoltaParser(HTMLParser):
+    """Extrai células sem depender de HTML bem formado ou de BeautifulSoup."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[tuple[str, bool]]] = []
+        self._row: list[tuple[str, bool]] | None = None
+        self._text: list[str] | None = None
+        self._colspan = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if tag.lower() == "tr":
+            self._row = []
+        elif tag.lower() in {"td", "th"} and self._row is not None:
+            self._text = []
+            self._colspan = any(k.lower() == "colspan" for k, _ in attrs)
+
+    def handle_data(self, data: str) -> None:
+        if self._text is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"td", "th"} and self._row is not None and self._text is not None:
+            self._row.append((" ".join("".join(self._text).split()), self._colspan))
+            self._text = None
+        elif tag.lower() == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+
+def hora_corrida_para_segundos(valor: object) -> Optional[float]:
+    """Converte HH:MM:SS.mmm ou o horário abreviado pós-meia-noite M:SS.mmm."""
+    texto = limpar_texto(valor)
+    if not texto:
+        return None
+    partes = texto.replace(",", ".").split(":")
+    try:
+        if len(partes) == 3:
+            return round(int(partes[0]) * 3600 + int(partes[1]) * 60 + float(partes[2]), 3)
+        if len(partes) == 2:
+            return round(int(partes[0]) * 60 + float(partes[1]), 3)
+        if len(partes) == 1:
+            return round(float(partes[0]), 3)
+    except ValueError:
+        return None
+    return None
+
+
+def parse_volta_a_volta(html: str, nome_arquivo: str = "arquivo.html") -> list[dict]:
+    """Interpreta os blocos de piloto e normaliza a linha temporal da corrida."""
+    parser = _TabelaVoltaParser()
+    parser.feed(html)
+    piloto: Optional[dict] = None
+    voltas: list[dict] = []
+    header_re = re.compile(r"^(\d+)\s*-\s*\[(\d+)\]\s*(.*?)(?:\s*-\s*([^\-]+))?$")
+
+    for row in parser.rows:
+        valores = [cell[0] for cell in row]
+        if len(row) == 1 and row[0][1]:
+            match = header_re.match(valores[0])
+            piloto = ({"kart_numero": match.group(1).zfill(3), "driver_id": match.group(2),
+                       "driver_name": match.group(3).strip(), "classe": (match.group(4) or "").strip()}
+                      if match else None)
+            continue
+        if not piloto or len(valores) != 10 or not valores[1].isdigit():
+            continue
+        voltas.append({
+            **piloto, "arquivo_origem": nome_arquivo, "hora_dia": valores[0], "hora": valores[0],
+            "volta": int(valores[1]), "volta_lider": int(valores[2]) if valores[2].isdigit() else None,
+            "tempo_volta": valores[3], "tempo_volta_segundos": tempo_para_segundos(valores[3]),
+            "velocidade": valores[4], "sfspd": valores[5], "sfspd_tempo": valores[6],
+            "sfspd_tm": valores[6], "s1": valores[7], "s2": valores[8], "s3": valores[9]
+        })
+
+    # Detecta a virada comparando eventos na ordem cronológica de cada piloto;
+    # horários abreviados após 00:00 são segundos desde a nova meia-noite.
+    for driver_id in {v["driver_id"] for v in voltas}:
+        anteriores = -1.0
+        dia = 0
+        for volta in sorted((v for v in voltas if v["driver_id"] == driver_id), key=lambda v: v["volta"]):
+            atual = hora_corrida_para_segundos(volta["hora_dia"])
+            if atual is None:
+                volta["elapsed_time"] = None
+                continue
+            if anteriores >= 12 * 3600 and atual < 12 * 3600:
+                dia += 1
+            absoluto = atual + dia * 86400
+            volta["elapsed_time"] = round(absoluto, 3)
+            anteriores = atual
+
+    inicio = min((v["elapsed_time"] for v in voltas if v["elapsed_time"] is not None), default=0)
+    for volta in voltas:
+        if volta["elapsed_time"] is not None:
+            volta["elapsed_time"] = round(volta["elapsed_time"] - inicio, 3)
+    return voltas
 
 
 def limpar_texto(valor: object) -> Optional[str]:
@@ -319,16 +418,11 @@ async def ler_arquivo_importacao(event) -> None:
         nome_arquivo = str(file.name)
 
         if tipo_arquivo == "volta_a_volta":
-            LAST_DF = None
-            window.IMPORTACAO_PYSCRIPT_JSON = ""
-            set_html("pyStatus", f"⏳ Lendo {nome_arquivo} para seleção de pilotos da história...")
             html = await get_text_from_file(file)
-
-            if hasattr(window, "prepararPreviewVoltaAVoltaPyScript"):
-                window.prepararPreviewVoltaAVoltaPyScript(html, nome_arquivo)
-            else:
-                set_html("pyStatus", "✅ Volta a volta lido. A seleção será montada pelo JavaScript.")
-
+            registros = parse_volta_a_volta(html, nome_arquivo)
+            LAST_DF = pd.DataFrame(registros)
+            serializar_para_js(LAST_DF, nome_arquivo, tipo_arquivo)
+            set_html("pyStatus", f"✅ Volta a volta estruturado: {len(registros)} volta(s) identificada(s).")
             return
 
         if tipo_arquivo not in {"resultado_final", "classificacao"}:
@@ -363,4 +457,5 @@ def inicializar() -> None:
     set_html("pyStatus", "✅ PyScript carregado. Selecione Resultado final, Classificação ou Volta a volta e escolha o arquivo.")
 
 
-inicializar()
+if sys.platform == "emscripten":
+    inicializar()

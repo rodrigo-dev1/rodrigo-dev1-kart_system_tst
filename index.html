@@ -144,6 +144,27 @@
         @media (max-width: 430px) {
             .dashboard-cards { grid-template-columns:1fr; }
         }
+        .analytics-card { background:#171c24; border:1px solid #303744; border-radius:16px; padding:16px; margin:16px 0; overflow:hidden; }
+        .analytics-card h3 { margin:0 0 16px; display:flex; align-items:center; gap:8px; }
+        .analytics-help { display:inline-flex; width:20px; height:20px; align-items:center; justify-content:center; border:1px solid #657084; border-radius:50%; color:#aeb6c4; font-size:12px; cursor:help; }
+        .analytics-state { padding:24px; text-align:center; color:#aeb6c4; background:#171c24; border-radius:14px; margin-top:14px; }
+        .bar-chart { min-width:620px; overflow:visible; }
+        .regularity-zones { color:#aeb6c4; font-size:11px; padding:8px; border-bottom:1px dashed #465063; margin-bottom:6px; }
+        .metric-row { appearance:none; display:grid; grid-template-columns:180px minmax(4px,1fr) 82px; align-items:center; gap:8px; width:100%; min-height:37px; padding:5px 8px; margin:0; border:0; background:transparent; color:#fff; text-align:left; }
+        .metric-row:hover { background:#222a35; } .metric-row i { display:block; height:18px; border-radius:4px; transition:width .45s ease; }
+        .metric-row b { font-size:11px; white-space:nowrap; }
+        .race-controls { display:flex; justify-content:center; align-items:center; gap:10px; margin-bottom:14px; }
+        .race-controls button, .analytics-toggle button { width:auto; margin:0; padding:9px 13px; background:#29313d; }
+        .race-row { display:grid; grid-template-columns:35px minmax(40px,1fr) minmax(190px,1fr) 62px; align-items:center; gap:8px; min-height:52px; transition:transform .45s ease; }
+        .race-row small { display:block; color:#aeb6c4; margin-top:3px; } .race-track { height:7px; justify-self:end; background:linear-gradient(90deg,#ff4b4b,#ffb74d); border-radius:8px; transition:width .45s ease; }
+        .race-row em { font-style:normal; color:#aeb6c4; }.race-row .gain{color:#36c98f}.race-row .loss{color:#ff6b6b}
+        .analytics-toggle { display:flex; gap:8px; margin-bottom:10px; }.analytics-toggle .selected{background:#ff4b4b}
+        .analytics-kpis { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }.analytics-kpis span{background:#222a35;padding:8px;border-radius:8px;font-size:11px}
+        .metric-row.overtake { grid-template-columns:180px minmax(2px,1fr) 35px minmax(2px,1fr) 35px; }.metric-row .made{background:#36c98f}.metric-row .lost{background:#ff6b6b}
+        .analytics-modal { position:fixed; inset:0; z-index:1000010; background:rgba(0,0,0,.78); display:flex; align-items:center; justify-content:center; padding:14px; }
+        .analytics-modal-box { position:relative; width:min(900px,96vw); max-height:92vh; overflow:auto; background:#1d2129; border:1px solid #465063; border-radius:16px; padding:20px; }
+        .modal-close { position:absolute; right:10px; top:4px; width:auto; background:transparent; font-size:26px; margin:0; }
+        @media(max-width:680px){.analytics-card{overflow-x:auto}.bar-chart{min-width:560px}.race-row{min-width:650px}.analytics-modal-box{width:96vw;padding:14px}.analytics-kpis{min-width:560px}}
 
     </style>
 </head>
@@ -281,6 +302,7 @@
         <div class="nav-item" onclick="abrirGestao()">⚙️<br>Opções</div>
 </nav>
 
+<script src="kart_analytics.js"></script>
 <script src="script.js"></script>
 <script type="py" src="kart_parser.py" config="./pyscript.toml"></script>
 </body>
