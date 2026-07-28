@@ -58,6 +58,18 @@
         };
     }
 
+    // A tabela "Resultado da Etapa" e hidratada de dashboardResumo.corrida.
+    // Portanto, quando esse resumo existe, ele precisa preceder a subcollection
+    // (que pode ter sido parcialmente sobrescrita por uma importacao antiga).
+    function getStageReferenceRows(stageDocument, resultRows = [], classificationRows = []) {
+        const persistedResult = stageDocument?.dashboardResumo?.corrida;
+        if (Array.isArray(persistedResult) && persistedResult.length) return persistedResult;
+        if (Array.isArray(resultRows) && resultRows.length) return resultRows;
+        const persistedClassification = stageDocument?.dashboardResumo?.classificacao;
+        if (Array.isArray(persistedClassification) && persistedClassification.length) return persistedClassification;
+        return Array.isArray(classificationRows) ? classificationRows : [];
+    }
+
     function isChampionshipDriver(item, official) {
         const id = getDriverId(item);
         if (id) return official?.ids?.has(id) || false;
@@ -70,11 +82,15 @@
         const resultIds = ids(resultRows), snapshotIds = ids(snapshotRows), filteredIds = ids(filteredRows);
         const expected = new Set([...resultIds].filter(id => snapshotIds.has(id)));
         return {
+            expectedCount: resultIds.size,
+            lapCount: snapshotIds.size,
+            expectedInLapCount: expected.size,
+            actualCount: filteredIds.size,
             expected: [...expected],
             missing: [...expected].filter(id => !filteredIds.has(id)),
             unexpected: [...filteredIds].filter(id => !expected.has(id))
         };
     }
 
-    return { normalizeDriverId, normalizeDriverName, getDriverId, getDriverName, driverKey, getStageChampionshipDrivers, isChampionshipDriver, compareStageDriverIds };
+    return { normalizeDriverId, normalizeDriverName, getDriverId, getDriverName, driverKey, getStageReferenceRows, getStageChampionshipDrivers, isChampionshipDriver, compareStageDriverIds };
 }));

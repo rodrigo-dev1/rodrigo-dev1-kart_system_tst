@@ -28,7 +28,18 @@ test("resultado da etapa define a intersecao oficial dos snapshots", () => {
     const snapshot = analytics.gerarSnapshots(voltas, [...oficiais.ids])[0].positions;
     assert.deepEqual(snapshot.filter(p => p.isChampionship).map(p => p.driver_id), ["41938", "123"]);
     assert.equal(snapshot.find(p => p.driver_id === "999").positionOverall, 3);
-    assert.deepEqual(identity.compareStageDriverIds(resultado, snapshot, snapshot.filter(p => p.isChampionship)), { expected: ["41938", "123"], missing: [], unexpected: [] });
+    assert.deepEqual(identity.compareStageDriverIds(resultado, snapshot, snapshot.filter(p => p.isChampionship)), {
+        expectedCount: 2, lapCount: 3, expectedInLapCount: 2, actualCount: 2,
+        expected: ["41938", "123"], missing: [], unexpected: []
+    });
+});
+
+test("usa exatamente o resultado exibido quando a subcollection antiga esta parcial", () => {
+    const exibidos = Array.from({ length: 11 }, (_, index) => ({ driver_id: String(index + 1), driver_name: `P${index + 1}` }));
+    const subcollectionParcial = exibidos.slice(0, 6);
+    const rows = identity.getStageReferenceRows({ dashboardResumo: { corrida: exibidos } }, subcollectionParcial, []);
+    assert.equal(rows.length, 11);
+    assert.deepEqual([...identity.getStageChampionshipDrivers(rows).ids], exibidos.map(identity.getDriverId));
 });
 
 test("ultrapassagens mantem participantes oficiais com zero", () => {

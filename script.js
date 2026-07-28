@@ -6233,10 +6233,12 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         resultadoDocId
     };
     const pilotosCadastrados = await buscarPilotosDoCampeonatoRankingFirestore(campeonato);
-    // pilotos_resultado e a fonte autoritativa da etapa: essas linhas são as
-    // mesmas exibidas em "Resultado da Etapa" e já refletem a seleção feita na
-    // importação. O cadastro global é somente fallback para etapas sem resultado.
-    const corrida = corridaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const corridaCollection = corridaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const classificacaoCollection = classificacaoSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    // Usa literalmente a origem que hidrata "Resultado da Etapa". Analytics
+    // antigos podem ter apenas parte dos oficiais na subcollection, enquanto
+    // dashboardResumo.corrida preserva o resultado completo exibido (11 x 6).
+    const corrida = DriverIdentity.getStageReferenceRows(meta, corridaCollection, classificacaoCollection);
     const oficiaisEtapa = DriverIdentity.getStageChampionshipDrivers(corrida, pilotosCadastrados.pilotos);
     const pilotosCampeonato = {
         pilotos: oficiaisEtapa.drivers,
@@ -6244,7 +6246,7 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         nomesLegados: oficiaisEtapa.legacyNames,
         nomes: oficiaisEtapa.legacyNames
     };
-    const classificacao = classificacaoSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
+    const classificacao = classificacaoCollection
         .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId, pilotosCampeonato));
     const voltaInfo = await dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVoltaAtual, nomeArquivoVoltaAtual, idImportacaoVoltaAtual);
     const vinculosVolta = vinculosVoltaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
@@ -6323,16 +6325,20 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
 }
 
 async function carregarAnalyticsEtapa(resultadoDocRef) {
-    const [snap, campSnap, resultadoRowsSnap] = await Promise.all([
+    const [snap, campSnap, resultadoDocSnap, resultadoRowsSnap, classificacaoRowsSnap] = await Promise.all([
         resultadoDocRef.collection("analytics").doc("volta_a_volta_v1").get(),
         resultadoDocRef.parent.parent.get(),
-        resultadoDocRef.collection("pilotos_resultado").get()
+        resultadoDocRef.get(),
+        resultadoDocRef.collection("pilotos_resultado").get(),
+        resultadoDocRef.collection("classificacao").get()
     ]);
     if (!snap.exists) return null;
     const data = snap.data() || {};
     const campData = campSnap.exists ? campSnap.data() || {} : {};
     const cadastrados = getChampionshipDrivers(campData.nome || campData.nome_exibicao || resultadoDocRef.parent.parent.id);
-    const resultadoRows = resultadoRowsSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const resultadoCollection = resultadoRowsSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const classificacaoCollection = classificacaoRowsSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const resultadoRows = DriverIdentity.getStageReferenceRows(resultadoDocSnap.data() || {}, resultadoCollection, classificacaoCollection);
     const oficiaisEtapa = DriverIdentity.getStageChampionshipDrivers(resultadoRows, cadastrados.pilotos);
     const oficiais = { ids: oficiaisEtapa.ids, nomesLegados: oficiaisEtapa.legacyNames };
     const snapshots = (data.snapshots || []).map(snapshot => ({
@@ -6685,6 +6691,14 @@ function renderRaceSnapshot() {
     label.textContent += ` · ${positions.length} piloto(s)`;
     if (RACE_MODE === "campeonato" && ETAPA_ANALYTICS_ATUAL?.stageResultDrivers?.length) {
         const check = DriverIdentity.compareStageDriverIds(ETAPA_ANALYTICS_ATUAL.stageResultDrivers, snap.positions || [], positions);
+        console.info("Validação Pilotos do Campeonato", {
+            EXPECTED: check.expectedCount,
+            "VOLTA A VOLTA": check.lapCount,
+            "EXPECTED COM VOLTAS": check.expectedInLapCount,
+            EXIBIDOS: check.actualCount,
+            MISSING: check.missing,
+            UNEXPECTED: check.unexpected
+        });
         if (check.missing.length || check.unexpected.length) console.warn("Inconsistência de pilotos da etapa", check);
     }
     alvo.innerHTML=`<div class="race-table">${positions.map(p=>{const pos=p.positionOverall, delta=p.positionDeltaOverall, laps=p.lapsBehindPreviousOverall, gapValue=p.gapToPreviousOverall; const gap=pos===1?'Líder':laps?`+${laps} volta(s)`: `+${Number(gapValue||0).toFixed(3)}s`; const tooltip=`${getDriverFullDisplayName(p)} | Kart: ${p.kart_numero||'-'} | Posição: P${pos} | Gap: ${gap}`; return `<div class="race-row" title="${htmlEscape(tooltip)}"><b class="race-position">P${pos}</b><span class="race-track-cell"><i class="race-track" style="width:${Math.max(12,100-pos*7)}%"></i></span><span class="race-driver"><strong>${htmlEscape(getDriverShortName(p))}</strong><small>${gap}</small></span><em class="${delta>0?'gain':delta<0?'loss':''}">${RACE_SNAPSHOT_INDEX===0?'Largada':delta>0?`▲ +${delta}`:delta<0?`▼ ${delta}`:'= 0'}</em></div>`;}).join('')}</div>`;
