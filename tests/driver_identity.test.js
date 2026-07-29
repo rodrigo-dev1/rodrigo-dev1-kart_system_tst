@@ -33,7 +33,7 @@ test("snapshot carrega retardatarios e oficiais ainda sem passagem", () => {
     assert.deepEqual(snapshot.positions.filter(row => row.isChampionship).map(row => row.completedLaps), [8, 8, 7, 6]);
 });
 
-test("carry-forward mantem piloto e delta usa posicao relativa do campeonato", () => {
+test("carry-forward mantem piloto e não converte delta isolado em ultrapassagem", () => {
     const official = ["A", "B", "C", "D"].map(driver_id => ({ driver_id }));
     const laps = [
         ...official.map((row, index) => ({ ...row, volta: 4, volta_lider: 4, elapsed_time: 240 + index })),
@@ -49,7 +49,7 @@ test("carry-forward mantem piloto e delta usa posicao relativa do campeonato", (
         { positions: [{ driver_id: "A", isChampionship: true, positionChampionship: 4, positionDeltaChampionship: 0 }] },
         { positions: [{ driver_id: "A", isChampionship: true, positionChampionship: 2, positionDeltaChampionship: 2 }] }
     ], true);
-    assert.equal(synthetic[0].feitas, 2);
+    assert.equal(synthetic[0].feitas, 0);
 });
 
 test("processamento e idempotente para a mesma entrada", () => {

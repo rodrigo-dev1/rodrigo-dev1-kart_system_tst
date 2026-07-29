@@ -13,7 +13,7 @@ const analytics = require("../kart_analytics.js");
 }
 
 const official = new Set(["A", "B", "C"]);
-const pilot = (uid, values) => ({ pilot_uid: uid, ...values });
+const pilot = (uid, values) => ({ pilot_uid: uid, driver_name_display: uid, ...values });
 const rows = [
     pilot("X", { overtakes:{madeOverall:12}, start:{deltaOverall:7}, bestLap:{time:59,rankOverall:1}, leadership:{lapsLedOverall:12}, pace:{regularity:.1,status:"ok",cleanLaps:10}, qualifying:{positionOverall:1}, result:{positionOverall:1} }),
     pilot("A", { overtakes:{madeOverall:8}, start:{gridPositionOverall:10,firstLapPositionOverall:5,deltaOverall:5}, bestLap:{time:59.5,rankOverall:2}, leadership:{lapsLedOverall:0}, pace:{regularity:.2,status:"ok",cleanLaps:5}, qualifying:{positionOverall:3}, result:{positionOverall:4} }),
@@ -69,6 +69,27 @@ assert.equal(championship.start.pilot_uid, "A");
 assert.equal(championship.start.start.deltaOverall, 4);
 assert.equal(championship.leadership, null);
 assert.equal(championship.regularity.pace.regularity, .5);
+assert.equal(championship.regularity.pilot_uid, "A");
+assert.equal(championship.regularity.driver_name_display, "A");
+assert.deepEqual(championship.regularity.regularities, [.4, .6]);
+assert.equal(championship.regularity.stagesUsed, 2);
+assert.equal(championship.regularity.metric, "averageRegularity");
+
+{
+    const order = ids => ids.map((pilot_uid, index) => ({ pilot_uid, driver_name: pilot_uid, positionOverall: index + 1, isChampionship: true }));
+    const grid = { positions: order(["A", "B", "C", "D"]) };
+    const lap1 = { positions: order(["C", "A", "D", "B"]) };
+    const total = analytics.calcularUltrapassagens([grid, lap1], false, grid.positions);
+    assert.deepEqual(total.map(row => [row.pilot_uid, row.feitas, row.tomadas]), [["A", 0, 1], ["B", 0, 2], ["C", 2, 0], ["D", 1, 0]]);
+    assert.deepEqual(analytics.assertOvertakeInvariant(total, "teste múltiplo"), { made: 3, taken: 3 });
+}
+
+{
+    const previous = [{ pilot_uid:"A", driver_name:"A", positionOverall:3, positionDeltaOverall:2, isChampionship:true }];
+    const current = [{ pilot_uid:"A", driver_name:"A", positionOverall:1, positionDeltaOverall:2, isChampionship:true }];
+    const rows = analytics.calcularUltrapassagens([{ positions:previous }, { positions:current }], false, previous);
+    assert.equal(rows[0].feitas, 0, "positionDelta sem adversário comparável não é ultrapassagem");
+}
 
 const realistic = [
     pilot("A", { race:{bestLap:60.516}, qualifying:{positionOverall:4,positionChampionship:1}, start:{deltaOverall:4}, firstLapOvertakes:{madeOverall:5,takenOverall:1,balanceOverall:4}, overtakes:{madeOverall:8}, leadership:{lapsLedOverall:0}, pace:{regularity:.444,cleanLaps:12} }),

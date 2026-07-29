@@ -4,7 +4,7 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 11;
+    const VERSION = 12;
     const MIN_CLEAN_LAPS = 2;
     const num = value => {
         if (value === null || value === undefined || value === "") return null;
@@ -23,10 +23,12 @@
      * treats a Firestore document id as pilot_uid. */
     function normalizePilotAnalyticsForHighlights(raw = {}) {
         const pilot_uid = normalizePilotUid(pick(raw.pilot_uid, raw.pilotUid));
+        const driver_name_display = pick(raw.driver_name_display, raw.name, raw.driver_name, raw.nome) || "";
         return {
             ...raw,
             pilot_uid,
-            name: pick(raw.name, raw.driver_name_display, raw.driver_name, raw.nome) || "",
+            name: driver_name_display,
+            driver_name_display,
             result: {
                 positionOverall: num(pick(raw.result?.positionOverall, raw.positionOverall, raw.posicao_geral_arquivo)),
                 positionChampionship: num(pick(raw.result?.positionChampionship, raw.positionChampionship, raw.posicao_campeonato))
@@ -115,7 +117,12 @@
         const validated = Object.fromEntries(Object.entries(highlights).map(([highlightType, highlight]) => {
             if (!highlight) return [highlightType, null];
             const pilot_uid = String(identity.getPilotUid(highlight) || highlight.pilot_uid || "");
-            if (official.has(pilot_uid)) return [highlightType, highlight];
+            if (official.has(pilot_uid)) {
+                if (highlightType === "regularity" && num(highlight?.pace?.regularity) !== null && !String(highlight.driver_name_display || highlight.name || "").trim()) {
+                    throw new Error("[Kart/Highlights] regularidade com valor sem driver_name_display");
+                }
+                return [highlightType, highlight];
+            }
             console.error("[Kart/Highlights] piloto externo selecionado", { highlightType, pilot_uid, name: identity.getDriverName(highlight) });
             return [highlightType, null];
         }));
@@ -158,13 +165,17 @@
         const byPilot = new Map();
         candidates.forEach(row => {
             const uid = String(identity.getPilotUid(row) || row.pilot_uid);
-            if (!byPilot.has(uid)) byPilot.set(uid, { ...row, overtakes: { ...row.overtakes, madeOverall: 0 }, leadership: { ...row.leadership, lapsLedOverall: 0 }, _regularities: [] });
+            if (!byPilot.has(uid)) byPilot.set(uid, { ...row, pilot_uid: uid, driver_name_display: row.driver_name_display || row.name, overtakes: { ...row.overtakes, madeOverall: 0 }, leadership: { ...row.leadership, lapsLedOverall: 0 }, _regularities: [], stagesUsed: 0 });
             const aggregate = byPilot.get(uid);
             aggregate.overtakes.madeOverall += num(row.overtakes?.madeOverall) || 0;
             aggregate.leadership.lapsLedOverall += num(row.leadership?.lapsLedOverall) || 0;
-            if (regularityIsValid(row.pace)) aggregate._regularities.push(num(row.pace.regularity));
+            if (regularityIsValid(row.pace)) {
+                aggregate._regularities.push(num(row.pace.regularity));
+                aggregate.stagesUsed += 1;
+            }
         });
-        const aggregate = [...byPilot.values()].map(row => ({ ...row, pace: { ...row.pace, status: row._regularities.length ? "ok" : "voltas_insuficientes", cleanLaps: row._regularities.length ? MIN_CLEAN_LAPS : 0, regularity: mean(row._regularities) } }));
+        const aggregate = [...byPilot.values()].map(row => ({ ...row, regularities: [...row._regularities], metric: "averageRegularity", pace: { ...row.pace, status: row._regularities.length ? "ok" : "voltas_insuficientes", cleanLaps: row._regularities.length ? MIN_CLEAN_LAPS : 0, regularity: mean(row._regularities) } }));
+        console.table(aggregate.map(row => ({ pilot_uid: row.pilot_uid, name: row.driver_name_display, stageCount: row.stagesUsed, regularities: row.regularities, averageRegularity: row.pace.regularity })));
         const highlights = buildStageHighlights(aggregate, officialPilotUids);
         const bestLaps = candidates.filter(row => num(row.race?.bestLap) > 0).sort((a, b) => num(a.race.bestLap) - num(b.race.bestLap));
         highlights.bestLap = bestLaps[0] || null;
@@ -290,25 +301,26 @@
             changes.forEach(change => {
                 const resultKey = identity.getPilotUid(change) || identity.getDriverId(change) || key(change);
                 if (!result.has(resultKey)) result.set(resultKey, { ...change, feitas: 0, tomadas: 0, saldo: 0 });
-                let made = change.madeOverall, taken = change.takenOverall;
-                // Snapshots legados/incompletos podem não conter os pares que
-                // explicam o delta. Neles preservamos o saldo já consolidado.
-                const delta = championshipOnly ? Number(change.positionDeltaChampionship) : Number(change.positionDeltaOverall);
-                if (!made && !taken && Number.isFinite(delta) && delta !== 0) {
-                    made = Math.max(0, delta); taken = Math.max(0, -delta);
-                }
-                result.get(resultKey).feitas += made;
-                result.get(resultKey).tomadas += taken;
+                result.get(resultKey).feitas += change.madeOverall;
+                result.get(resultKey).tomadas += change.takenOverall;
             });
         }
-        return [...result.values()].map(i => ({ ...i, saldo: i.feitas - i.tomadas }));
+        const rows = [...result.values()].map(i => ({ ...i, saldo: i.feitas - i.tomadas }));
+        assertOvertakeInvariant(rows, championshipOnly ? "campeonato" : "geral");
+        return rows;
+    }
+    function assertOvertakeInvariant(rows, context = "corrida") {
+        const made = (rows || []).reduce((sum, row) => sum + Number(row.feitas ?? row.madeOverall ?? 0), 0);
+        const taken = (rows || []).reduce((sum, row) => sum + Number(row.tomadas ?? row.takenOverall ?? 0), 0);
+        if (made !== taken) throw new Error(`[Kart/Overtakes] invariante violada em ${context}: made=${made}, taken=${taken}`);
+        return { made, taken };
     }
     function calculatePositionChangesBetweenSnapshots(previousOrder, currentOrder, championshipOnly = false) {
         const filter = rows => (rows || []).filter(row => !championshipOnly || row.isChampionship);
         const previous = filter(previousOrder), current = filter(currentOrder);
         const prevPos = new Map(previous.map((row, index) => [key(row), index]));
         const currPos = new Map(current.map((row, index) => [key(row), index]));
-        return current.filter(row => prevPos.has(key(row))).map(row => {
+        const changes = current.filter(row => prevPos.has(key(row))).map(row => {
             let madeOverall = 0, takenOverall = 0;
             previous.forEach(other => {
                 if (key(other) === key(row) || !currPos.has(key(other))) return;
@@ -319,6 +331,8 @@
             });
             return { ...row, madeOverall, takenOverall, balanceOverall: madeOverall - takenOverall };
         });
+        assertOvertakeInvariant(changes, "transição");
+        return changes;
     }
     function gridSnapshot(gridRows, participants, officialIds) {
         const known = new Map((participants || []).map(row => [key(row), row]));
@@ -340,6 +354,7 @@
         const grid = gridSnapshot(gridRows, [...participants.values()], new Set(idsCampeonato));
         const transitions = grid.length ? [{ lap: 0, positions: grid, drivers: grid }, ...snapshots] : snapshots;
         const firstLapChanges = transitions.length > 1 ? calculatePositionChangesBetweenSnapshots(transitions[0].positions, transitions[1].positions, false) : [];
+        assertOvertakeInvariant(firstLapChanges, "primeira volta");
         firstLapChanges.forEach(change => {
             const gridPosition = grid.findIndex(row => key(row) === key(change)) + 1;
             const firstLapPosition = snapshots[0]?.positions?.findIndex(row => key(row) === key(change)) + 1;
@@ -361,5 +376,5 @@
             }
         };
     }
-    return { VERSION, MIN_CLEAN_LAPS, toNullableNumber: num, normalizePilotUid, normalizePilotAnalyticsForHighlights, regularityIsValid, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, calculatePositionChangesBetweenSnapshots, processarVoltasEtapa, consolidarPilotAnalytics, getOfficialHighlightCandidates, getOfficialMetricCandidates, validateHighlights, buildStageHighlights, buildChampionshipHighlights, championshipSnapshotRows };
+    return { VERSION, MIN_CLEAN_LAPS, toNullableNumber: num, normalizePilotUid, normalizePilotAnalyticsForHighlights, regularityIsValid, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, calculatePositionChangesBetweenSnapshots, assertOvertakeInvariant, processarVoltasEtapa, consolidarPilotAnalytics, getOfficialHighlightCandidates, getOfficialMetricCandidates, validateHighlights, buildStageHighlights, buildChampionshipHighlights, championshipSnapshotRows };
 }));
