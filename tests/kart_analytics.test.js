@@ -42,15 +42,46 @@ assert.equal(highlights.hatTrick, null);
 
 {
     const snapshot = ids => ids.map((pilot_uid, index) => ({ pilot_uid, positionOverall: index + 1, isChampionship: !pilot_uid.startsWith("X") }));
-    const grid = snapshot(["X1", "X2", "X3", "X4", "X5", "X6", "X7", "A", "B"]);
-    const lap1 = snapshot(["X1", "X2", "X3", "A", "X4", "X5", "X6", "X7", "B"]);
+    const grid = snapshot(["X1", "X2", "X3", "X4", "X5", "X6", "X7", "RODRIGO", "B"]);
+    const lap1 = snapshot(["X1", "X2", "X3", "RODRIGO", "X4", "X5", "X6", "X7", "B"]);
     const starts = analytics.calculateStartAnalytics({ gridSnapshot: grid, firstLapSnapshot: lap1, drivers: grid });
-    assert.deepEqual(starts.get("A"), {
+    assert.deepEqual(starts.get("RODRIGO"), {
         gridPositionOverall: 8, firstLapPositionOverall: 4, deltaOverall: 4,
-        gridPositionChampionship: 1, firstLapPositionChampionship: 1, deltaChampionship: 0
+        gridPositionChampionship: 1, firstLapPositionChampionship: 1, deltaChampionship: 0,
+        gridSource: null
     });
     assert.equal(starts.get("X4").deltaOverall, -1, "externos permanecem no cálculo geral");
-    assert.equal(analytics.calculateStartAnalytics({ gridSnapshot: grid, firstLapSnapshot: [], drivers: grid }).get("A").deltaOverall, null, "ausência não vira zero");
+    assert.equal(analytics.calculateStartAnalytics({ gridSnapshot: grid, firstLapSnapshot: [], drivers: grid }).get("RODRIGO").deltaOverall, null, "ausência não vira zero");
+}
+
+{
+    // Regressão do caso real: a ordem documental (Léo em 7º no array) jamais
+    // pode sobrescrever a posição oficial P3 gravada pela classificação.
+    const classification = [
+        { pilot_uid: "X1", posicao_final: 1 }, { pilot_uid: "X2", posicao_final: 2 },
+        { pilot_uid: "R", posicao_final: 8 }, { pilot_uid: "X3", posicao_final: 5 },
+        { pilot_uid: "X4", posicao_final: 6 }, { pilot_uid: "X5", posicao_final: 7 },
+        { pilot_uid: "LEO", posicao_final: 3 }, { pilot_uid: "X6", posicao_final: 4 }
+    ];
+    const officialDrivers = [{ pilot_uid: "LEO" }, { pilot_uid: "R" }];
+    const lap = (pilot_uid, elapsed_time) => ({ pilot_uid, driver_name: pilot_uid, volta: 1, volta_lider: 1, elapsed_time, tempo_volta_segundos: elapsed_time });
+    const processed = analytics.processarVoltasEtapa([
+        lap("X1", 1), lap("X2", 2), lap("LEO", 4), lap("R", 3),
+        lap("X6", 5), lap("X3", 6), lap("X4", 7), lap("X5", 8)
+    ], officialDrivers, classification);
+    assert.equal(processed.snapshots[0].snapshotType, "grid");
+    assert.equal(processed.snapshots[0].label, "LARGADA");
+    assert.equal(processed.gridSnapshot.positions.find(row => row.pilot_uid === "LEO").positionOverall, 3);
+    assert.deepEqual(processed.startAnalytics.get("LEO"), {
+        gridPositionOverall: 3, firstLapPositionOverall: 4, deltaOverall: -1,
+        gridPositionChampionship: 1, firstLapPositionChampionship: 2, deltaChampionship: -1,
+        gridSource: "classificacao"
+    });
+    assert.deepEqual(processed.startAnalytics.get("R"), {
+        gridPositionOverall: 8, firstLapPositionOverall: 3, deltaOverall: 5,
+        gridPositionChampionship: 2, firstLapPositionChampionship: 1, deltaChampionship: 1,
+        gridSource: "classificacao"
+    });
 }
 
 {

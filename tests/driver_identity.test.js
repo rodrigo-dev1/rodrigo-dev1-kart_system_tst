@@ -114,8 +114,10 @@ test("analytics preserva corrida completa e oficiais sem metrica ou ultrapassage
     const official = [{ driver_id: "1", driver_name: "OFICIAL COM VOLTA", isChampionship: true }, { driver_id: "2", driver_name: "OFICIAL SEM VOLTA", isChampionship: true }];
     const laps = [{ driver_id: "1", driver_name: "OFICIAL COM VOLTA", isChampionship: true, volta: 1, volta_lider: 1, elapsed_time: 2, tempo_volta_segundos: 60 }, { driver_id: "9", driver_name: "EXTERNO", isChampionship: false, volta: 1, volta_lider: 1, elapsed_time: 1, tempo_volta_segundos: 59 }];
     const result = analytics.processarVoltasEtapa(laps, official);
-    assert.deepEqual(result.snapshots[0].positions.map(p => p.positionOverall), [1, 2, 3]);
-    assert.equal(result.snapshots[0].positions.find(p => p.driver_id === "2").stateSource, "awaiting_first_passage");
+    assert.equal(result.snapshots[0].snapshotType, "grid");
+    assert.deepEqual(result.snapshots[0].positions, [], "sem classificação não inventa grid");
+    assert.deepEqual(result.snapshots[1].positions.map(p => p.positionOverall), [1, 2, 3]);
+    assert.equal(result.snapshots[1].positions.find(p => p.driver_id === "2").stateSource, "awaiting_first_passage");
     assert.equal(result.regularidade.find(p => p.driver_id === "2").status, "voltas_insuficientes");
     assert.deepEqual(result.ultrapassagensCampeonato.map(p => p.driver_id).sort(), ["1", "2"]);
 });
