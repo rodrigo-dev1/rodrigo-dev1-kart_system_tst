@@ -3,6 +3,16 @@ global.DriverIdentity = require("../driver_identity.js");
 const analytics = require("../kart_analytics.js");
 
 {
+    assert.deepEqual(analytics.getPilotStageOvertakes({
+        ultrapassagensFeitas: 9, ultrapassagensTomadas: 2, saldoUltrapassagens: 99,
+        firstLapOvertakes: { madeOverall: 4 }, start: { deltaOverall: 7 }
+    }, { warn: false }), { made: 9, taken: 2, balance: 7 });
+    assert.deepEqual(analytics.getPilotStageOvertakes({ start: { deltaOverall: 7 } }, { warn: false }), {
+        made: null, taken: null, balance: null
+    });
+}
+
+{
     const order = ids => ids.map((pilot_uid, index) => ({ pilot_uid, driver_name: pilot_uid, positionOverall: index + 1, isChampionship: !pilot_uid.startsWith("X") }));
     let changes = analytics.calculatePositionChangesBetweenSnapshots(order(["A", "R", "B", "C"]), order(["B", "R", "A", "C"]));
     const mixed = changes.find(x => x.pilot_uid === "R");
@@ -65,6 +75,18 @@ const championship = analytics.buildChampionshipHighlights([
 ], new Set(["A", "B"]));
 assert.equal(championship.overtakes.pilot_uid, "A");
 assert.equal(championship.overtakes.overtakes.madeOverall, 7);
+assert.equal(championship.overtakes.overtakes.takenOverall, 0);
+assert.equal(championship.overtakes.overtakes.balanceOverall, 7);
+
+{
+    assert.throws(() => analytics.buildChampionshipHighlights([
+        { etapa_id: "e1", analytics: [pilot("A", { overtakes: { madeOverall: 1, takenOverall: 0 } })] },
+        { etapa_id: "e1", analytics: [pilot("A", { overtakes: { madeOverall: 1, takenOverall: 0 } })] }
+    ], new Set(["A"])), /etapa duplicada/);
+    assert.throws(() => analytics.buildChampionshipHighlights([
+        { etapa_id: "e1", analytics: [pilot("A"), pilot("A")] }
+    ], new Set(["A"])), /pilot analytics duplicado/);
+}
 assert.equal(championship.start.pilot_uid, "A");
 assert.equal(championship.start.start.deltaOverall, 4);
 assert.equal(championship.leadership, null);

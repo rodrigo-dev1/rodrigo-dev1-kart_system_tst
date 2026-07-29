@@ -20,6 +20,7 @@
     const driverId = item => DriverIdentity.getDriverId(item);
     const pilotUid = item => DriverIdentity.getPilotUid(item);
     const pilotKey = item => pilotUid(item) || driverId(item);
+    const stageOvertakes = row => KartAnalytics.getPilotStageOvertakes(row);
 
     function pilotChampionships(pilot) {
         return typeof vinculosPiloto === "function" ? vinculosPiloto(pilot) : (pilot.campeonatos || []);
@@ -117,7 +118,7 @@
     function scores(rows) {
         const regularity = avg(rows.map(r => r.pace?.regularity));
         const pace = avg(rows.map(r => r.pace?.pace));
-        const start = avg(rows.map(r => r.start?.deltaOverall)) || 0, over = avg(rows.map(r => r.overtakes?.balanceOverall)) || 0;
+        const start = avg(rows.map(r => r.start?.deltaOverall)) || 0, over = avg(rows.map(r => stageOvertakes(r).balance)) || 0;
         const points = rows.reduce((s, r) => s + Number(r.result?.points || 0), 0), possible = rows.length * Math.max(...Object.values(PONTOS_PADRAO));
         return [regularity === null ? 0 : 100 / (1 + regularity), pace === null ? 0 : 100 / (1 + Math.max(0, pace / Math.max(1, pace) - 1)), Math.max(0, Math.min(100, 50 + start * 10)), Math.max(0, Math.min(100, 50 + over * 10)), possible ? points / possible * 100 : 0].map(v => Math.round(v));
     }
@@ -155,12 +156,12 @@
         const points = n(row.scoring?.total) ?? n(row.result?.points);
         const bestLap = row.race?.bestLap ?? row.bestLap?.time;
         const bestRank = n(row.race?.bestLapRankOverall) ?? n(row.bestLap?.rankOverall);
-        const balance = n(row.overtakes?.balanceOverall);
+        const canonicalOvertakes = stageOvertakes(row), balance = n(canonicalOvertakes.balance);
         const metric = (icon, label, value, detail = "", cls = "") => `<div class="stage-metric ${cls}"><small>${icon} ${label}</small><b>${value}</b>${detail ? `<span>${detail}</span>` : ""}</div>`;
         const firstLap = `<div class="stage-metric stage-first-lap"><small>🚀 1ª VOLTA</small><b>${position(row.start?.gridPositionOverall)} <i>→</i> ${position(row.start?.firstLapPositionOverall)}</b>${deltaMarkup(row.start?.deltaOverall)}</div>`;
         const rankDetail = bestRank !== null && bestRank > 0 ? `P${bestRank} geral` : "";
         const regularity = n(row.pace?.regularity);
-        const made = n(row.overtakes?.madeOverall), taken = n(row.overtakes?.takenOverall);
+        const made = n(canonicalOvertakes.made), taken = n(canonicalOvertakes.taken);
         const overtakes = made === null && taken === null ? "—" : `${made === null ? "—" : `+${made}`} / ${taken === null ? "—" : `-${taken}`}`;
         const balanceCls = balance > 0 ? "positive" : balance < 0 ? "negative" : "neutral";
         return card("🏁 RESUMO DA ETAPA", `<div class="stage-summary-head"><b>Etapa ${esc(row.etapa || "—")}</b><span>${present(row.dataCorrida) ? esc(formatarDataBR(row.dataCorrida)) : "—"}</span></div><div class="stage-journeys">${positionJourney("GERAL DA BATERIA", "Posição considerando todos os participantes da corrida.", overallFrom, overallTo, finishOverall)}${positionJourney("CAMPEONATO", "Posição considerando somente os pilotos oficiais do campeonato.", championshipFrom, championshipTo, finishChampionship)}</div><div class="stage-metrics">${firstLap}${metric("📊", "PONTOS", points === null ? "—" : `${points} pts`)}${metric("⏱", "MELHOR VOLTA", duration(bestLap), rankDetail)}${metric("〽", "PACE", duration(row.pace?.pace))}${metric("📏", "REGULARIDADE", regularity === null ? "—" : `±${regularity.toFixed(3)}s`)}${metric("🔄", "ULTRAPASSAGENS", overtakes, made === null && taken === null ? "" : "feitas / tomadas")}${metric("↔", "SALDO", signed(balance), "", balanceCls)}</div>`, "pilot-wide stage-summary");
@@ -169,7 +170,7 @@
         const target = el("pilotDashboardContent"), initials = DriverIdentity.getDriverDisplayName(pilot).split(/\s+/).map(x=>x[0]).slice(0,2).join("");
         const filtered = selectedData(rows), photo = pilot.foto || pilot.foto_url || "";
         const specificStage = el("pilotFilterStage")?.value && el("pilotFilterStage").value !== "all";
-        const historical = `${card("📈 Evolução de Posições",lineChart(filtered,[{name:"Posição Final geral",color:"#ff6b6b",get:r=>r.result?.positionOverall},{name:"Largada geral",color:"#5ca8ff",get:r=>r.start?.gridPositionOverall},{name:"Melhor Volta geral",color:"#ffca5c",get:r=>r.bestLap?.rankOverall}],true),"pilot-wide")}${card("📊 Pontuação por Etapa",bars(filtered,r=>r.result?.points,r=>`Etapa ${r.etapa}: ${r.result?.points||0} pontos`))}${card("↔ Saldo de Ultrapassagens",bars(filtered,r=>r.overtakes?.balanceOverall,r=>`Feitas ${r.overtakes?.madeOverall||0} · Tomadas ${r.overtakes?.takenOverall||0} · Saldo ${r.overtakes?.balanceOverall||0}`))}${card("🏁 Performance na Largada",bars(filtered,r=>r.start?.deltaOverall,r=>`Etapa ${r.etapa}: ${r.start?.deltaOverall??"N/D"}`))}${card("〽 Ritmo e Regularidade",lineChart(filtered,[{name:"Pace",color:"#36c98f",get:r=>r.pace?.pace},{name:"Pace - Regularidade",color:"#5ca8ff",get:r=>n(r.pace?.pace)-n(r.pace?.regularity)},{name:"Pace + Regularidade",color:"#8d75d8",get:r=>n(r.pace?.pace)+n(r.pace?.regularity)}]),"pilot-wide")}${card("⏱ Evolução da Melhor Volta",lineChart(filtered,[{name:"Ranking geral",color:"#ffca5c",get:r=>r.bestLap?.rankOverall}],true))}`;
+        const historical = `${card("📈 Evolução de Posições",lineChart(filtered,[{name:"Posição Final geral",color:"#ff6b6b",get:r=>r.result?.positionOverall},{name:"Largada geral",color:"#5ca8ff",get:r=>r.start?.gridPositionOverall},{name:"Melhor Volta geral",color:"#ffca5c",get:r=>r.bestLap?.rankOverall}],true),"pilot-wide")}${card("📊 Pontuação por Etapa",bars(filtered,r=>r.result?.points,r=>`Etapa ${r.etapa}: ${r.result?.points||0} pontos`))}${card("↔ Saldo de Ultrapassagens",bars(filtered,r=>stageOvertakes(r).balance,r=>{const o=stageOvertakes(r);return `Etapa ${r.etapa}\nFeitas: ${o.made??"N/D"}\nTomadas: ${o.taken??"N/D"}\nSaldo: ${signed(o.balance)}`}))}${card("🏁 Performance na Largada",bars(filtered,r=>r.start?.deltaOverall,r=>`Etapa ${r.etapa}: ${r.start?.deltaOverall??"N/D"}`))}${card("〽 Ritmo e Regularidade",lineChart(filtered,[{name:"Pace",color:"#36c98f",get:r=>r.pace?.pace},{name:"Pace - Regularidade",color:"#5ca8ff",get:r=>n(r.pace?.pace)-n(r.pace?.regularity)},{name:"Pace + Regularidade",color:"#8d75d8",get:r=>n(r.pace?.pace)+n(r.pace?.regularity)}]),"pilot-wide")}${card("⏱ Evolução da Melhor Volta",lineChart(filtered,[{name:"Ranking geral",color:"#ffca5c",get:r=>r.bestLap?.rankOverall}],true))}`;
         target.innerHTML = `<div class="pilot-hero"><div class="pilot-avatar">${photo?`<img src="${esc(photo)}" alt="">`:esc(initials)}</div><div><span>DASHBOARD DO PILOTO</span><h2>${esc(DriverIdentity.getDriverDisplayName(pilot))}</h2><p>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text || "Campeonatos")} · ${filtered.length} etapa(s) disputada(s)</p></div></div><div class="pilot-kpis">${kpis(filtered)}</div><div class="pilot-grid">${card("📋 Resultados por Corrida",resultsTable(filtered),"pilot-wide")}${specificStage ? stageSummary(filtered[0]) : historical}${card("🏆 Distribuição de Pódios",podium(filtered))}${card("🎯 Perfil de Performance",radar(filtered))}${card("🏅 Conquistas",achievements(filtered),"pilot-wide")}${card("📅 Comparação por Campeonato",resultsTable(filtered),"pilot-wide")}${card("🏁 Campeonatos",`<div class="pilot-champ-card"><b>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text||"-")}</b><span>${filtered.reduce((s,r)=>s+Number(r.result?.points||0),0)} pontos · ${filtered.length} corridas · posição média ${fmt(avg(filtered.map(r=>r.result?.positionChampionship)))}</span><button onclick="show('dash')">Ver Campeonato</button></div>`,"pilot-wide")}</div>`;
     }
     async function filter() {

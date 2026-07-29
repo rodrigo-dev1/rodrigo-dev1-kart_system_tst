@@ -10,7 +10,8 @@ const context = {
         getDriverId: () => "driver",
         getPilotUid: () => "pilot",
         getDriverDisplayName: () => "Piloto"
-    }
+    },
+    KartAnalytics: require("../kart_analytics.js")
 };
 vm.runInNewContext(fs.readFileSync("pilot_dashboard.js", "utf8"), context);
 
