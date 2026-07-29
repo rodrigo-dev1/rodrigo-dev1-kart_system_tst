@@ -40,6 +40,28 @@ assert.equal(highlights.leadership, null);
 assert.equal(highlights.regularity.pilot_uid, "A");
 assert.equal(highlights.hatTrick, null);
 
+{
+    const snapshot = ids => ids.map((pilot_uid, index) => ({ pilot_uid, positionOverall: index + 1, isChampionship: !pilot_uid.startsWith("X") }));
+    const grid = snapshot(["X1", "X2", "X3", "X4", "X5", "X6", "X7", "A", "B"]);
+    const lap1 = snapshot(["X1", "X2", "X3", "A", "X4", "X5", "X6", "X7", "B"]);
+    const starts = analytics.calculateStartAnalytics({ gridSnapshot: grid, firstLapSnapshot: lap1, drivers: grid });
+    assert.deepEqual(starts.get("A"), {
+        gridPositionOverall: 8, firstLapPositionOverall: 4, deltaOverall: 4,
+        gridPositionChampionship: 1, firstLapPositionChampionship: 1, deltaChampionship: 0
+    });
+    assert.equal(starts.get("X4").deltaOverall, -1, "externos permanecem no cálculo geral");
+    assert.equal(analytics.calculateStartAnalytics({ gridSnapshot: grid, firstLapSnapshot: [], drivers: grid }).get("A").deltaOverall, null, "ausência não vira zero");
+}
+
+{
+    const tied = analytics.buildStageHighlights([
+        pilot("B", { result: { positionOverall: 2 }, start: { gridPositionOverall: 8, firstLapPositionOverall: 4, deltaOverall: 4 } }),
+        pilot("A", { result: { positionOverall: 1 }, start: { gridPositionOverall: 6, firstLapPositionOverall: 2, deltaOverall: 4 } }),
+        pilot("X", { result: { positionOverall: 1 }, start: { gridPositionOverall: 10, firstLapPositionOverall: 1, deltaOverall: 9 } })
+    ], new Set(["A", "B"]));
+    assert.equal(tied.start.pilot_uid, "A", "desempata pela melhor posição ao final da primeira volta");
+}
+
 const lap4ExternalPass = analytics.championshipSnapshotRows({ positions: [
     pilot("A", { positionOverall:4, positionChampionship:1, positionDeltaOverall:0 }),
     pilot("B", { positionOverall:6, positionChampionship:2, positionDeltaOverall:1 }),
