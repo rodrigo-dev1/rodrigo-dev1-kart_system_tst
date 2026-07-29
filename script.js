@@ -5326,15 +5326,24 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
         const pilotKey = dashboardPilotoKey(piloto);
         if (pilotKey && !ultrapassagens.has(pilotKey)) ultrapassagens.set(pilotKey, { piloto, total: 0, tomadas: 0 });
     });
-    for (let index = 1; index < transitionOrders.length; index += 1) {
-        KartAnalytics.calculatePositionChangesBetweenSnapshots(transitionOrders[index - 1], transitionOrders[index]).forEach(change => {
-            const pilotKey = dashboardPilotoKey(change);
-            const atual = ultrapassagens.get(pilotKey) || { piloto: change, total: 0, tomadas: 0 };
-            atual.total += Number(change.madeOverall || 0);
-            atual.tomadas += Number(change.takenOverall || 0);
-            ultrapassagens.set(pilotKey, atual);
+    // O dashboard somente adapta a saída da fonte canônica. Não percorre nem
+    // interpreta transições por conta própria.
+    const canonicalOvertakes = KartAnalytics.calculateRaceOvertakes({
+        snapshots: transitionOrders.map((positions, index) => ({
+            snapshotType: index === 0 && gridOrder.length ? "grid" : "race",
+            numeroVolta: index === 0 && gridOrder.length ? 0 : index,
+            positions
+        }))
+    });
+    canonicalOvertakes.forEach(row => {
+        const pilotKey = dashboardPilotoKey(row);
+        if (!pilotKey) return;
+        ultrapassagens.set(pilotKey, {
+            piloto: row,
+            total: Number(row.race?.made || 0),
+            tomadas: Number(row.race?.taken || 0)
         });
-    }
+    });
 
     const official = values => [...values].filter(v => officialPilotUids.has(getPilotUid(v.piloto)));
     const topUltrapassagens = official(ultrapassagens.values()).filter(v => v.total > 0).sort((a, b) => b.total - a.total || dashboardNomePiloto(a.piloto).localeCompare(dashboardNomePiloto(b.piloto)))[0] || null;
@@ -6833,8 +6842,21 @@ async function carregarAnalyticsEtapa(resultadoDocRef) {
         positions: (snapshot.positions || []).map(marcarOficial)
     }));
 
-    const ultrapassagensCampeonatoBase = data.ultrapassagensCampeonato || KartAnalytics.calcularUltrapassagens(snapshots, true, participants);
-    const ultrapassagensGeralBase = data.ultrapassagensGeral || KartAnalytics.calcularUltrapassagens(snapshots, false, participants);
+    const analyticsAtual = Number(data.analyticsVersion) >= KartAnalytics.VERSION;
+    const possuiGridCanonico = snapshots[0]?.snapshotType === "grid"
+        && Number(snapshots[0]?.numeroVolta ?? snapshots[0]?.lap) === 0;
+    if (!analyticsAtual && !possuiGridCanonico) {
+        // Sem o grid da classificação não existe referência válida para
+        // recomputar GRID -> V1. Falhar explicitamente é mais seguro que
+        // reapresentar os arrays antigos ou fabricar uma largada.
+        throw new Error(`[Kart/Overtakes] analytics v${data.analyticsVersion ?? 0} incompatível; reprocesse a etapa com v${KartAnalytics.VERSION}`);
+    }
+    const ultrapassagensCampeonatoBase = analyticsAtual && Array.isArray(data.ultrapassagensCampeonato)
+        ? data.ultrapassagensCampeonato
+        : KartAnalytics.calcularUltrapassagens(snapshots, true, participants);
+    const ultrapassagensGeralBase = analyticsAtual && Array.isArray(data.ultrapassagensGeral)
+        ? data.ultrapassagensGeral
+        : KartAnalytics.calcularUltrapassagens(snapshots, false, participants);
 
     return {
         ...data,

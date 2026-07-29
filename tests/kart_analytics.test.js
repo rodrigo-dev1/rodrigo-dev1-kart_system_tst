@@ -2,6 +2,8 @@ const assert = require("node:assert/strict");
 global.DriverIdentity = require("../driver_identity.js");
 const analytics = require("../kart_analytics.js");
 
+assert.equal(analytics.VERSION, 17, "mudança do contrato de snapshots/ultrapassagens invalida analytics antigos");
+
 {
     assert.deepEqual(analytics.getPilotStageOvertakes({
         ultrapassagensFeitas: 9, ultrapassagensTomadas: 2, saldoUltrapassagens: 99,
@@ -224,6 +226,35 @@ assert.equal(analytics.normalizePilotUid(" A "), "A");
     assert.deepEqual(analytics.calculateRaceOvertakes({ snapshots: [snapshot(["A", "P"]), snapshot(["P", "A"])] }).get("P").race,
         analytics.calculateRaceOvertakes({ snapshots: [snapshot(["A", "P"]), snapshot(["P", "A"])] }).get("P").race,
         "reprocessamento determinístico não acumula");
+}
+
+{
+    const qualifying = ["A", "B", "C", "D", "E", "F", "JULIO"].map((pilot_uid, index) => ({
+        pilot_uid, driver_name: pilot_uid, posicao_geral_arquivo: index + 1
+    }));
+    const lap = (pilot_uid, position, leaderLap) => ({
+        pilot_uid, driver_name: pilot_uid, volta: leaderLap, volta_lider: leaderLap,
+        elapsed_time: leaderLap * 100 + position, tempo_volta_segundos: 60
+    });
+    const lap1Order = ["A", "B", "C", "JULIO", "D", "E", "F"];
+    const lap2Order = ["A", "JULIO", "B", "C", "D", "E", "F"];
+    const laps = [
+        ...lap1Order.map((id, index) => lap(id, index + 1, 1)),
+        ...lap2Order.map((id, index) => lap(id, index + 1, 2))
+    ];
+    const processed = analytics.processarVoltasEtapa(laps, qualifying, qualifying);
+    const julio = processed.raceOvertakes.get("JULIO");
+    assert.equal(processed.snapshots[0].label, "LARGADA");
+    assert.equal(processed.snapshots[1].label, "VOLTA 1");
+    assert.deepEqual(julio.firstLap, { made: 3, taken: 0, balance: 3 }, "P7 -> P4 tem saldo +3");
+    assert.deepEqual(julio.race, { made: 5, taken: 0, balance: 5 });
+    assert.ok(julio.race.made >= julio.firstLap.made);
+    assert.ok(julio.race.taken >= julio.firstLap.taken);
+    assert.deepEqual(julio.transitionBreakdown, [
+        { from: "GRID", to: "V1", transition: "GRID -> V1", made: 3, taken: 0, balance: 3 },
+        { from: "V1", to: "V2", transition: "V1 -> V2", made: 2, taken: 0, balance: 2 }
+    ]);
+    assert.deepEqual(processed.raceOvertakes.raceTotals, { made: 5, taken: 5 });
 }
 
 console.log("kart analytics: highlights/evolution passed; pilot index candidate count = 6");

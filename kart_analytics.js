@@ -4,7 +4,9 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 16;
+    // v17: snapshots de largada e ultrapassagens pairwise são um contrato de
+    // persistência novo. Documentos de versões anteriores não são compatíveis.
+    const VERSION = 17;
     const MIN_CLEAN_LAPS = 2;
     const num = value => {
         if (value === null || value === undefined || value === "") return null;
@@ -406,8 +408,12 @@
                 const row = result.get(id);
                 row.race.made += change.made;
                 row.race.taken += change.taken;
-                const from = transitionIndex === 1 ? "GRID" : `V${transitionIndex - 1}`;
-                const to = `V${transitionIndex}`;
+                const previousSnapshot = snapshots[transitionIndex - 1] || {};
+                const currentSnapshot = snapshots[transitionIndex] || {};
+                const from = previousSnapshot.snapshotType === "grid"
+                    ? "GRID"
+                    : `V${num(previousSnapshot.numeroVolta ?? previousSnapshot.lap) ?? transitionIndex - 1}`;
+                const to = `V${num(currentSnapshot.numeroVolta ?? currentSnapshot.lap) ?? transitionIndex}`;
                 row.transitionBreakdown.push({ from, to, transition: `${from} -> ${to}`, made: change.made, taken: change.taken, balance: change.balance });
                 if (transitionIndex === 1) row.firstLap = { made: change.made, taken: change.taken, balance: change.balance };
             });
