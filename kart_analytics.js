@@ -4,7 +4,7 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 14;
+    const VERSION = 15;
     const MIN_CLEAN_LAPS = 2;
     const num = value => {
         if (value === null || value === undefined || value === "") return null;
@@ -382,25 +382,43 @@
         assertOvertakeInvariant(changes, "transição");
         return changes;
     }
+    function officialGridPosition(row) {
+        return num(pick(row?.qualifying?.positionOverall, row?.positionOverall, row?.posicao_geral_arquivo, row?.posicao_final, row?.posicao));
+    }
     function gridSnapshot(gridRows, participants, officialIds) {
         const known = new Map((participants || []).map(row => [key(row), row]));
-        return (gridRows || []).map((row, index) => {
+        const ordered = (gridRows || []).map((row, documentIndex) => ({ row, documentIndex, position: officialGridPosition(row) }))
+            .filter(item => item.position !== null)
+            .sort((a, b) => a.position - b.position || a.documentIndex - b.documentIndex);
+        let championshipPosition = 0;
+        return ordered.map(({ row, position }) => {
             const merged = { ...(known.get(key(row)) || {}), ...row };
-            return { ...merged, positionOverall: index + 1, isChampionship: officialIds.has(identity.getPilotUid(merged) || identity.getDriverId(merged)) };
+            const isChampionship = officialIds.has(identity.getPilotUid(merged) || identity.getDriverId(merged));
+            return {
+                ...merged,
+                positionOverall: position,
+                positionChampionship: isChampionship ? ++championshipPosition : null,
+                completedLaps: 0,
+                positionDeltaOverall: 0,
+                positionDeltaChampionship: 0,
+                isChampionship,
+                source: "classificacao",
+                gridSource: "classificacao"
+            };
         });
     }
 
     /** Fonte única da performance de largada. As posições gerais são índices
      * dos snapshots completos; só a posição de campeonato filtra externos. */
-    function calculateStartAnalytics({ gridSnapshot: gridRows = [], firstLapSnapshot: firstLapRows = [], drivers = [] } = {}) {
+    function calculateStartAnalytics({ gridSnapshot: gridRows = [], firstLapSnapshot: firstLapRows = [], officialPilotUids = [], drivers = [] } = {}) {
         const rows = value => Array.isArray(value) ? value : (value?.positions || value?.drivers || []);
         const grid = rows(gridRows), firstLap = rows(firstLapRows);
         const driverRows = drivers.length ? drivers : grid;
         const analyticsKey = row => identity.getPilotUid(row) || identity.getDriverId(row) || key(row);
-        const official = new Set(driverRows.filter(row => row.isChampionship === true).map(analyticsKey).filter(Boolean));
-        const positionMap = list => new Map(list.map((row, index) => [analyticsKey(row), index + 1]).filter(([id]) => id));
-        const championshipMap = list => positionMap(list.filter(row => official.has(analyticsKey(row))));
-        const gridOverall = positionMap(grid), firstOverall = positionMap(firstLap);
+        const official = new Set([...(officialPilotUids || []), ...driverRows.filter(row => row.isChampionship === true).map(analyticsKey)].filter(Boolean));
+        const positionMap = (list, field) => new Map(list.map((row, index) => [analyticsKey(row), num(row?.[field]) ?? index + 1]).filter(([id]) => id));
+        const championshipMap = list => positionMap(list.filter(row => official.has(analyticsKey(row))), "positionChampionship");
+        const gridOverall = positionMap(grid, "positionOverall"), firstOverall = positionMap(firstLap, "positionOverall");
         const gridChampionship = championshipMap(grid), firstChampionship = championshipMap(firstLap);
         const result = new Map();
         driverRows.forEach(driver => {
@@ -416,7 +434,8 @@
                 deltaOverall: gridPositionOverall !== null && firstLapPositionOverall !== null ? gridPositionOverall - firstLapPositionOverall : null,
                 gridPositionChampionship,
                 firstLapPositionChampionship,
-                deltaChampionship: gridPositionChampionship !== null && firstLapPositionChampionship !== null ? gridPositionChampionship - firstLapPositionChampionship : null
+                deltaChampionship: gridPositionChampionship !== null && firstLapPositionChampionship !== null ? gridPositionChampionship - firstLapPositionChampionship : null,
+                gridSource: grid.find(row => analyticsKey(row) === id)?.gridSource || grid.find(row => analyticsKey(row) === id)?.source || null
             });
         });
         return result;
@@ -430,25 +449,37 @@
         const regularidade = calcularRegularidade(voltas);
         const regularityKeys = new Set(regularidade.items.map(key));
         participants.forEach((p, k) => { if (!regularityKeys.has(k)) regularidade.items.push({ pilot_uid: identity.getPilotUid(p), driver_id: identity.getDriverId(p) || null, driver_name: identity.getDriverName(p), kart_numero: p.kart_numero || "", isChampionship: p.isChampionship, regularidade: null, pace: null, bestLap: null, bestLapValid: null, cleanLaps: 0, cleanLapsCount: 0, totalLaps: 0, cleanLapNumbers: [], excludedLapNumbers: [], laps: [], status: "voltas_insuficientes" }); });
-        const snapshots = gerarSnapshots(voltas, officialRows, gridRows);
         const grid = gridSnapshot(gridRows, [...participants.values()], new Set(idsCampeonato));
+        const raceSnapshots = gerarSnapshots(voltas, officialRows, grid);
+        const gridState = { snapshotIndex: 0, snapshotType: "grid", type: "grid", lap: 0, numeroVolta: 0, label: "LARGADA", positions: grid, drivers: grid };
+        const firstRaceSnapshot = raceSnapshots[0];
+        if (firstRaceSnapshot) {
+            const previous = new Map(grid.map(row => [key(row), row]));
+            firstRaceSnapshot.positions.forEach(row => {
+                const old = previous.get(key(row));
+                row.positionDeltaOverall = old ? old.positionOverall - row.positionOverall : 0;
+                row.positionDeltaChampionship = old && row.isChampionship ? old.positionChampionship - row.positionChampionship : 0;
+            });
+        }
+        raceSnapshots.forEach((snapshot, index) => Object.assign(snapshot, { snapshotIndex: index + 1, snapshotType: "race", type: "race", label: `VOLTA ${snapshot.numeroVolta}` }));
+        const snapshots = [gridState, ...raceSnapshots];
         console.debug("[Kart/BestStart/Snapshot]", { index: 0, lap: 0, snapshotType: "grid", leaderLap: null, driverCount: grid.length });
-        snapshots.forEach((snapshot, index) => console.debug("[Kart/BestStart/Snapshot]", {
+        raceSnapshots.forEach((snapshot, index) => console.debug("[Kart/BestStart/Snapshot]", {
             index: index + 1, lap: snapshot.lap, snapshotType: "race",
             leaderLap: snapshot.numeroVolta, driverCount: snapshot.positions?.length || 0
         }));
-        const transitions = grid.length ? [{ lap: 0, positions: grid, drivers: grid }, ...snapshots] : snapshots;
-        const firstLapSnapshot = snapshots.find(snapshot => num(snapshot.leaderLap ?? snapshot.lap ?? snapshot.numeroVolta) === 1) || null;
+        const transitions = snapshots;
+        const firstLapSnapshot = raceSnapshots.find(snapshot => num(snapshot.leaderLap ?? snapshot.lap ?? snapshot.numeroVolta) === 1) || null;
         const startDrivers = [...new Map([...grid, ...participants.values()].map(row => [identity.getPilotUid(row) || identity.getDriverId(row) || key(row), row])).values()];
-        const startAnalytics = calculateStartAnalytics({ gridSnapshot: grid, firstLapSnapshot, drivers: startDrivers });
+        const startAnalytics = calculateStartAnalytics({ gridSnapshot: gridState, firstLapSnapshot, officialPilotUids: idsCampeonato, drivers: startDrivers });
         const firstLapChanges = transitions.length > 1 ? calculatePositionChangesBetweenSnapshots(transitions[0].positions, transitions[1].positions, false) : [];
         assertOvertakeInvariant(firstLapChanges, "primeira volta");
         firstLapChanges.forEach(change => {
             const gridPosition = grid.findIndex(row => key(row) === key(change)) + 1;
-            const firstLapPosition = snapshots[0]?.positions?.findIndex(row => key(row) === key(change)) + 1;
-            if (grid.length === snapshots[0]?.positions?.length && change.balanceOverall !== gridPosition - firstLapPosition) console.warn("[Kart/FirstLap] inconsistência", { pilot_uid: identity.getPilotUid(change), gridPosition, firstLapPosition, ...change });
+            const firstLapPosition = firstLapSnapshot?.positions?.findIndex(row => key(row) === key(change)) + 1;
+            if (grid.length === firstLapSnapshot?.positions?.length && change.balanceOverall !== gridPosition - firstLapPosition) console.warn("[Kart/FirstLap] inconsistência", { pilot_uid: identity.getPilotUid(change), gridPosition, firstLapPosition, ...change });
         });
-        return { analyticsVersion: VERSION, participants: [...participants.values()], regularidade: regularidade.items, gridPace: regularidade.gridPace, gridSnapshot: grid, firstLapSnapshot, startAnalytics, snapshots, firstLapChanges, ultrapassagensCampeonato: calcularUltrapassagens(transitions, true, [...participants.values()]), ultrapassagensGeral: calcularUltrapassagens(transitions, false, [...participants.values()]) };
+        return { analyticsVersion: VERSION, participants: [...participants.values()], regularidade: regularidade.items, gridPace: regularidade.gridPace, gridSnapshot: gridState, firstLapSnapshot, startAnalytics, snapshots, firstLapChanges, ultrapassagensCampeonato: calcularUltrapassagens(transitions, true, [...participants.values()]), ultrapassagensGeral: calcularUltrapassagens(transitions, false, [...participants.values()]) };
     }
     function consolidarPilotAnalytics(rows, { campeonatoId = "", etapaId = "all" } = {}) {
         const stages = (rows || []).filter(row => (!campeonatoId || row.campeonato_id === campeonatoId) && (!etapaId || etapaId === "all" || row.etapa_id === etapaId));
