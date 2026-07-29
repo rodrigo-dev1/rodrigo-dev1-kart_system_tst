@@ -5734,8 +5734,8 @@ function dashboardCardsGeral(geral) {
         dashboardCard({
             titulo: "🚀 + Ultrapassagens",
             piloto: geral.topUltrapassagens?.piloto,
-            valor: geral.topUltrapassagens ? `${geral.topUltrapassagens.total} posições` : "-",
-            descricao: "Soma das posições ganhas volta a volta",
+            valor: geral.topUltrapassagens ? `${geral.topUltrapassagens.total} ${geral.topUltrapassagens.total === 1 ? "ultrapassagem" : "ultrapassagens"}` : "-",
+            descricao: "Soma das ultrapassagens feitas nas etapas",
             vazio: !geral.topUltrapassagens
         }),
         dashboardCard({
@@ -6025,8 +6025,9 @@ function dashboardPilotoPersistivel(item) {
         pilot_uid: getPilotUid(item),
         driver_id: item.driver_id || item.id_piloto || "",
         id_piloto: item.id_piloto || item.driver_id || "",
-        driver_name: item.driver_name || item.nome || item.piloto || "-",
-        nome: item.nome || item.driver_name || item.piloto || "-",
+        driver_name_display: item.driver_name_display || item.name || item.driver_name || item.nome || item.piloto || "-",
+        driver_name: item.driver_name_display || item.name || item.driver_name || item.nome || item.piloto || "-",
+        nome: item.driver_name_display || item.name || item.nome || item.driver_name || item.piloto || "-",
         kart_numero: item.kart_numero || item.kart_number || "",
         classe: item.classe || "",
         posicao_final2: Number(item.posicao_final2 || 0),
@@ -6055,8 +6056,9 @@ function dashboardPilotoMetricaPersistivel(item) {
         pilot_uid: getPilotUid(item),
         driver_id: item.driver_id || item.id_piloto || "",
         id_piloto: item.id_piloto || item.driver_id || "",
-        driver_name: item.driver_name || item.nome || item.piloto || "-",
-        nome: item.nome || item.driver_name || item.piloto || "-",
+        driver_name_display: item.driver_name_display || item.name || item.driver_name || item.nome || item.piloto || "-",
+        driver_name: item.driver_name_display || item.name || item.driver_name || item.nome || item.piloto || "-",
+        nome: item.driver_name_display || item.name || item.nome || item.driver_name || item.piloto || "-",
         kart_numero: item.kart_numero || ""
     });
 }
@@ -6565,18 +6567,18 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         missingAnalytics: [...officialPilotUids].filter(uid => !analyticsUids.has(uid)),
         extraAnalytics: [...analyticsUids].filter(uid => !officialPilotUids.has(uid))
     });
+    const positiveDeltaByPilot = new Map();
+    (analytics.snapshots || []).forEach(snapshot => (snapshot.positions || []).forEach(row => {
+        const uid = getPilotUid(row);
+        positiveDeltaByPilot.set(uid, Number(positiveDeltaByPilot.get(uid) || 0) + Math.max(0, Number(row.positionDeltaOverall || 0)));
+    }));
     console.table(normalizedAnalytics.map(p => ({
-        pilot_uid: p.pilot_uid, driver_id: p.driver_id || null,
-        nome: p.name, isOfficial: officialPilotUids.has(p.pilot_uid),
-        bestLap: p.race.bestLap,
-        qualifyingPositionOverall: p.qualifying.positionOverall,
-        qualifyingPositionChampionship: p.qualifying.positionChampionship,
-        overtakesMadeOverall: p.overtakes.madeOverall,
-        startDeltaOverall: p.start.deltaOverall,
-        firstLapMadeOverall: p.firstLapOvertakes.madeOverall,
-        lapsLedOverall: p.leadership.lapsLedOverall,
-        regularity: p.pace.regularity, regularityStatus: p.pace.status,
-        cleanLaps: p.pace.cleanLaps
+        name: p.name, pilot_uid: p.pilot_uid, stage: meta?.etapa || "-",
+        firstLapMade: p.firstLapOvertakes.madeOverall,
+        totalMade: p.overtakes.madeOverall,
+        totalTaken: p.overtakes.takenOverall,
+        balance: p.overtakes.balanceOverall,
+        sumPositivePositionDelta: positiveDeltaByPilot.get(p.pilot_uid) || 0
     })));
     console.table(officialAnalytics.map(p => ({
         Nome: p.name,
@@ -6767,12 +6769,10 @@ async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeona
     console.log({ officialCount: officialPilotUids.size, analyticsCount: normalized.length, matchedCount: matched.length,
         missingAnalytics: [...officialPilotUids].filter(uid => !analyticsUids.has(uid)),
         extraAnalytics: [...analyticsUids].filter(uid => !officialPilotUids.has(uid)) });
-    console.table(normalized.map(p => ({ pilot_uid: p.pilot_uid, driver_id: p.driver_id || null, nome: p.name,
-        isOfficial: officialPilotUids.has(p.pilot_uid), bestLap: p.race.bestLap,
-        qualifyingPositionOverall: p.qualifying.positionOverall, qualifyingPositionChampionship: p.qualifying.positionChampionship,
-        overtakesMadeOverall: p.overtakes.madeOverall, startDeltaOverall: p.start.deltaOverall,
-        firstLapMadeOverall: p.firstLapOvertakes.madeOverall, lapsLedOverall: p.leadership.lapsLedOverall,
-        regularity: p.pace.regularity, regularityStatus: p.pace.status, cleanLaps: p.pace.cleanLaps })));
+    console.table(normalized.map(p => ({ pilot_uid: p.pilot_uid, name: p.name,
+        stage: p._stage || p.etapa || "-", firstLapMade: p.firstLapOvertakes.madeOverall,
+        totalMade: p.overtakes.madeOverall, totalTaken: p.overtakes.takenOverall,
+        balance: p.overtakes.balanceOverall, sumPositivePositionDelta: p.start.deltaOverall })));
     console.log("Highlights", championshipHighlights);
     console.groupEnd();
 
@@ -6789,7 +6789,7 @@ async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeona
         etapa: { docId: championshipHighlights.start.etapa_id || "", meta: { etapa: championshipHighlights.start._stage || championshipHighlights.start.etapa || "" } }
     };
     geral.topLideradas = championshipHighlights.leadership ? { piloto: pilot(championshipHighlights.leadership), total: championshipHighlights.leadership.leadership.lapsLedOverall } : null;
-    geral.topRegularidade = championshipHighlights.regularity ? { piloto: pilot(championshipHighlights.regularity), media: championshipHighlights.regularity.pace.regularity, valores: [] } : null;
+    geral.topRegularidade = championshipHighlights.regularity ? { piloto: pilot(championshipHighlights.regularity), media: championshipHighlights.regularity.pace.regularity, valores: championshipHighlights.regularity.regularities || [] } : null;
     geral.topPoles = championshipHighlights.pole ? { piloto: pilot(championshipHighlights.pole), total: championshipHighlights.pole.poleCount || 1 } : null;
     const resumoGeral = dashboardSerializarGeral(geral, ranking, stats);
 
