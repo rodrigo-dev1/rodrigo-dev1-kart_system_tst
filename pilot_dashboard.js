@@ -1,6 +1,7 @@
 (function () {
     "use strict";
     let cache = new Map();
+    let summaryPilots = [];
     const el = id => document.getElementById(id);
     const n = value => value === null || value === undefined || value === "" ? null : (Number.isFinite(Number(value)) ? Number(value) : null);
     const avg = values => { const valid = values.map(n).filter(Number.isFinite); return valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null; };
@@ -13,17 +14,32 @@
     function pilotChampionships(pilot) {
         return typeof vinculosPiloto === "function" ? vinculosPiloto(pilot) : (pilot.campeonatos || []);
     }
-    function populatePilots() {
+    async function loadPilotIndex() {
+        const byUid = new Map();
+        for (const camp of DB.campeonatos || []) {
+            const snap = await firestore.collection(COLLECTION_CAMPEONATOS).doc(camp.id).collection("pilot_summaries").get();
+            snap.docs.forEach(doc => {
+                const row = { ...doc.data(), pilot_uid: doc.data()?.pilot_uid || doc.id };
+                if (!byUid.has(row.pilot_uid)) byUid.set(row.pilot_uid, { ...row, campeonatos: [] });
+                byUid.get(row.pilot_uid).campeonatos.push(camp.id);
+            });
+        }
+        summaryPilots = [...byUid.values()].sort((a, b) => String(a.driver_name_display).localeCompare(String(b.driver_name_display)));
+        return summaryPilots;
+    }
+    async function populatePilots() {
         const select = el("pilotFilterDriver");
         if (!select) return;
         const selected = select.value;
-        select.innerHTML = `<option value="">Selecione</option>` + DB.pilotos
-            .filter(p => pilotKey(p)).map(p => `<option value="${esc(pilotKey(p))}">${esc(DriverIdentity.getDriverDisplayName(p))}</option>`).join("");
+        select.innerHTML = `<option value="">Carregando…</option>`;
+        await loadPilotIndex();
+        select.innerHTML = `<option value="">Selecione</option>` + summaryPilots
+            .map(p => `<option value="${esc(p.pilot_uid)}">${esc(p.driver_name_display)}</option>`).join("");
         if ([...select.options].some(o => o.value === selected)) select.value = selected;
         updateChampionships();
     }
     function updateChampionships() {
-        const pilot = DB.pilotos.find(p => pilotKey(p) === el("pilotFilterDriver")?.value);
+        const pilot = summaryPilots.find(p => p.pilot_uid === el("pilotFilterDriver")?.value);
         const linked = new Set(pilotChampionships(pilot || {}).flatMap(value => [String(value), normalizarDocId(value)]));
         const select = el("pilotFilterChampionship"), old = select?.value;
         if (!select) return;
@@ -43,9 +59,14 @@
     }
     async function queryPilotAnalytics(id) {
         if (cache.has(id)) return cache.get(id);
-        const isUid = String(id).startsWith("p_");
-        const snap = await firestore.collectionGroup("pilot_analytics").where(isUid ? "pilot_uid" : "driver_id", "==", String(id)).get();
-        const rows = snap.docs.map(doc => ({ ...doc.data(), _path: doc.ref.path }));
+        const rows = [];
+        for (const camp of DB.campeonatos || []) {
+            const stages = await firestore.collection(COLLECTION_CAMPEONATOS).doc(camp.id).collection("resultado_final").get();
+            for (const stage of stages.docs) {
+                const doc = await stage.ref.collection("pilot_analytics").doc(String(id)).get();
+                if (doc.exists) rows.push({ ...doc.data(), _path: doc.ref.path });
+            }
+        }
         cache.set(id, rows);
         return rows;
     }
@@ -86,7 +107,7 @@
     function scores(rows) {
         const regularity = avg(rows.map(r => r.pace?.regularity));
         const pace = avg(rows.map(r => r.pace?.pace));
-        const start = avg(rows.map(r => r.start?.delta)) || 0, over = avg(rows.map(r => r.overtakes?.balanceChampionship)) || 0;
+        const start = avg(rows.map(r => r.start?.deltaOverall)) || 0, over = avg(rows.map(r => r.overtakes?.balanceOverall)) || 0;
         const points = rows.reduce((s, r) => s + Number(r.result?.points || 0), 0), possible = rows.length * Math.max(...Object.values(PONTOS_PADRAO));
         return [regularity === null ? 0 : 100 / (1 + regularity), pace === null ? 0 : 100 / (1 + Math.max(0, pace / Math.max(1, pace) - 1)), Math.max(0, Math.min(100, 50 + start * 10)), Math.max(0, Math.min(100, 50 + over * 10)), possible ? points / possible * 100 : 0].map(v => Math.round(v));
     }
@@ -97,7 +118,7 @@
     }
     const card = (title, body, cls = "") => `<section class="pilot-card ${cls}"><h3>${title}</h3>${body}</section>`;
     function resultsTable(rows) {
-        return `<div class="pilot-table-wrap"><table class="pilot-table"><thead><tr><th>Etapa</th><th>Data</th><th>Campeonato</th><th>Posição</th><th>Pontos</th><th>Largada</th><th>Melhor Volta</th><th>Regularidade</th><th>Ultrapassagens</th><th>Ações</th></tr></thead><tbody>${rows.map(r => `<tr><td>Etapa ${r.etapa}</td><td>${esc(formatarDataBR(r.dataCorrida))}</td><td>${esc(r.campeonato)}</td><td>P${r.result?.positionChampionship || "-"}</td><td>${r.result?.points || 0}</td><td>P${r.start?.gridPosition || "-"}</td><td>${fmt(r.pace?.bestLap,"s")}</td><td>${fmt(r.pace?.regularity,"s")}</td><td>${Number(r.overtakes?.balanceChampionship || 0)}</td><td><button class="btn-view" onclick="abrirDetalhesPilotoEtapa('${esc(r.etapa_id)}')">Detalhes</button></td></tr>`).join("")}</tbody></table></div>`;
+        return `<div class="pilot-table-wrap"><table class="pilot-table"><thead><tr><th>Etapa</th><th>Data</th><th>Campeonato</th><th>Posição</th><th>Pontos</th><th>Grid</th><th>Melhor Volta</th><th>Regularidade</th><th>Ultrapassagens</th><th>Ações</th></tr></thead><tbody>${rows.map(r => `<tr><td>Etapa ${r.etapa}</td><td>${esc(formatarDataBR(r.dataCorrida))}</td><td>${esc(r.campeonato)}</td><td>P${r.result?.positionOverall || "-"}<small> · P${r.result?.positionChampionship || "-"} campeonato</small></td><td>${r.result?.points || 0}</td><td>P${r.start?.gridPositionOverall || "-"}</td><td>${fmt(r.bestLap?.time,"s")}</td><td>${fmt(r.pace?.regularity,"s")}</td><td>${Number(r.overtakes?.balanceOverall || 0)}</td><td><button class="btn-view" onclick="abrirDetalhesPilotoEtapa('${esc(r.etapa_id)}')">Detalhes</button></td></tr>`).join("")}</tbody></table></div>`;
     }
     function achievements(rows) {
         const count = key => rows.filter(r => r.achievements?.[key]).length, points = rows.reduce((s,r)=>s+Number(r.result?.points||0),0), possible=rows.length*20;
@@ -107,13 +128,13 @@
     function render(rows, pilot) {
         const target = el("pilotDashboardContent"), initials = DriverIdentity.getDriverDisplayName(pilot).split(/\s+/).map(x=>x[0]).slice(0,2).join("");
         const filtered = selectedData(rows), photo = pilot.foto || pilot.foto_url || "";
-        target.innerHTML = `<div class="pilot-hero"><div class="pilot-avatar">${photo?`<img src="${esc(photo)}" alt="">`:esc(initials)}</div><div><span>DASHBOARD DO PILOTO</span><h2>${esc(DriverIdentity.getDriverDisplayName(pilot))}</h2><p>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text || "Campeonatos")} · ${filtered.length} etapa(s) disputada(s)</p></div></div><div class="pilot-kpis">${kpis(filtered)}</div><div class="pilot-grid">${card("📋 Resultados por Corrida",resultsTable(filtered),"pilot-wide")}${card("📈 Evolução de Posições",lineChart(filtered,[{name:"Posição Final",color:"#ff6b6b",get:r=>r.result?.positionChampionship},{name:"Largada",color:"#5ca8ff",get:r=>r.start?.gridPosition},{name:"Melhor Volta",color:"#ffca5c",get:r=>r.bestLapRank?.overall}],true),"pilot-wide")}${card("🏆 Distribuição de Pódios",podium(filtered))}${card("🎯 Perfil de Performance",radar(filtered))}${card("📊 Pontuação por Etapa",bars(filtered,r=>r.result?.points,r=>`Etapa ${r.etapa}: ${r.result?.points||0} pontos`))}${card("↔ Saldo de Ultrapassagens",bars(filtered,r=>r.overtakes?.balanceChampionship,r=>`Feitas ${r.overtakes?.madeChampionship||0} · Tomadas ${r.overtakes?.takenChampionship||0} · Saldo ${r.overtakes?.balanceChampionship||0}`))}${card("🏁 Performance na Largada",bars(filtered,r=>r.start?.delta,r=>`Etapa ${r.etapa}: ${r.start?.delta??"N/D"}`))}${card("〽 Ritmo e Regularidade",lineChart(filtered,[{name:"Pace",color:"#36c98f",get:r=>r.pace?.pace},{name:"Pace - Regularidade",color:"#5ca8ff",get:r=>n(r.pace?.pace)-n(r.pace?.regularity)},{name:"Pace + Regularidade",color:"#8d75d8",get:r=>n(r.pace?.pace)+n(r.pace?.regularity)}]),"pilot-wide")}${card("⏱ Evolução da Melhor Volta",lineChart(filtered,[{name:"Ranking de melhor volta",color:"#ffca5c",get:r=>r.bestLapRank?.overall}],true))}${card("🏅 Conquistas",achievements(filtered),"pilot-wide")}${card("📅 Comparação por Campeonato",resultsTable(filtered),"pilot-wide")}${card("🏁 Campeonatos",`<div class="pilot-champ-card"><b>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text||"-")}</b><span>${filtered.reduce((s,r)=>s+Number(r.result?.points||0),0)} pontos · ${filtered.length} corridas · posição média ${fmt(avg(filtered.map(r=>r.result?.positionChampionship)))}</span><button onclick="show('dash')">Ver Campeonato</button></div>`,"pilot-wide")}</div>`;
+        target.innerHTML = `<div class="pilot-hero"><div class="pilot-avatar">${photo?`<img src="${esc(photo)}" alt="">`:esc(initials)}</div><div><span>DASHBOARD DO PILOTO</span><h2>${esc(DriverIdentity.getDriverDisplayName(pilot))}</h2><p>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text || "Campeonatos")} · ${filtered.length} etapa(s) disputada(s)</p></div></div><div class="pilot-kpis">${kpis(filtered)}</div><div class="pilot-grid">${card("📋 Resultados por Corrida",resultsTable(filtered),"pilot-wide")}${card("📈 Evolução de Posições",lineChart(filtered,[{name:"Posição Final geral",color:"#ff6b6b",get:r=>r.result?.positionOverall},{name:"Largada geral",color:"#5ca8ff",get:r=>r.start?.gridPositionOverall},{name:"Melhor Volta geral",color:"#ffca5c",get:r=>r.bestLap?.rankOverall}],true),"pilot-wide")}${card("🏆 Distribuição de Pódios",podium(filtered))}${card("🎯 Perfil de Performance",radar(filtered))}${card("📊 Pontuação por Etapa",bars(filtered,r=>r.result?.points,r=>`Etapa ${r.etapa}: ${r.result?.points||0} pontos`))}${card("↔ Saldo de Ultrapassagens",bars(filtered,r=>r.overtakes?.balanceOverall,r=>`Feitas ${r.overtakes?.madeOverall||0} · Tomadas ${r.overtakes?.takenOverall||0} · Saldo ${r.overtakes?.balanceOverall||0}`))}${card("🏁 Performance na Largada",bars(filtered,r=>r.start?.deltaOverall,r=>`Etapa ${r.etapa}: ${r.start?.deltaOverall??"N/D"}`))}${card("〽 Ritmo e Regularidade",lineChart(filtered,[{name:"Pace",color:"#36c98f",get:r=>r.pace?.pace},{name:"Pace - Regularidade",color:"#5ca8ff",get:r=>n(r.pace?.pace)-n(r.pace?.regularity)},{name:"Pace + Regularidade",color:"#8d75d8",get:r=>n(r.pace?.pace)+n(r.pace?.regularity)}]),"pilot-wide")}${card("⏱ Evolução da Melhor Volta",lineChart(filtered,[{name:"Ranking geral",color:"#ffca5c",get:r=>r.bestLap?.rankOverall}],true))}${card("🏅 Conquistas",achievements(filtered),"pilot-wide")}${card("📅 Comparação por Campeonato",resultsTable(filtered),"pilot-wide")}${card("🏁 Campeonatos",`<div class="pilot-champ-card"><b>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text||"-")}</b><span>${filtered.reduce((s,r)=>s+Number(r.result?.points||0),0)} pontos · ${filtered.length} corridas · posição média ${fmt(avg(filtered.map(r=>r.result?.positionChampionship)))}</span><button onclick="show('dash')">Ver Campeonato</button></div>`,"pilot-wide")}</div>`;
     }
     async function filter() {
         const id = el("pilotFilterDriver")?.value, target = el("pilotDashboardContent");
         if (!id) { target.innerHTML = `<div class="pilot-empty">Selecione um piloto</div>`; return; }
         target.innerHTML = `<div class="pilot-empty">Consultando analytics persistidos…</div>`;
-        try { const rows = await queryPilotAnalytics(id); render(rows, DB.pilotos.find(p => pilotKey(p) === id) || { pilot_uid:id, driver_name:id }); }
+        try { const rows = await queryPilotAnalytics(id); render(rows, summaryPilots.find(p => p.pilot_uid === id) || { pilot_uid:id, driver_name:id }); }
         catch (error) { console.error(error); target.innerHTML = `<div class="pilot-empty">Etapa ainda não reprocessada</div>`; }
     }
     window.inicializarPilotosDashboard = populatePilots;

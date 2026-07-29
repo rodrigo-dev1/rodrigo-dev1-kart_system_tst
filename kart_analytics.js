@@ -4,7 +4,7 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 7;
+    const VERSION = 8;
     const num = value => {
         const n = Number(value);
         return Number.isFinite(n) ? n : null;
@@ -27,10 +27,47 @@
         const rows = Array.isArray(snapshot?.drivers) ? snapshot.drivers : (Array.isArray(snapshot?.positions) ? snapshot.positions : []);
         if (mode === "geral") return rows.map(item => ({ ...item }));
         const expected = idsOficiais instanceof Set ? idsOficiais : new Set(idsOficiais || []);
-        return rows.filter(item => expected.has(identity.getPilotUid(item)) || expected.has(identity.getDriverId(item))).map((item, index) => ({
-            ...item,
-            positionChampionship: index + 1
-        }));
+        const filtered = rows
+            .filter(item => expected.has(identity.getPilotUid(item)) || expected.has(identity.getDriverId(item)))
+            .map(item => ({ ...item }));
+        return filtered
+            .map((item, index) => ({ ...item, positionChampionship: num(item.positionChampionship) || index + 1 }))
+            .sort((a, b) => Number(a.positionChampionship || Infinity) - Number(b.positionChampionship || Infinity));
+    }
+
+    function officialUidSet(officialPilotUids) {
+        return officialPilotUids instanceof Set ? officialPilotUids : new Set(officialPilotUids || []);
+    }
+
+    /** Metrics are already calculated against the complete race here.  This
+     * helper only restricts who is eligible to be presented as a winner. */
+    function getOfficialMetricCandidates(metricData, officialPilotUids) {
+        const official = officialUidSet(officialPilotUids);
+        return (metricData || []).filter(item => official.has(identity.getPilotUid(item) || item?.pilot_uid));
+    }
+
+    function buildStageHighlights(allAnalytics, officialPilotUids) {
+        const candidates = getOfficialMetricCandidates(allAnalytics, officialPilotUids);
+        const asc = (path, valid = Number.isFinite) => candidates.filter(x => valid(path(x))).sort((a, b) => path(a) - path(b))[0] || null;
+        const desc = path => candidates.filter(x => Number.isFinite(path(x))).sort((a, b) => path(b) - path(a))[0] || null;
+        const overallHat = p => p?.qualifying?.positionOverall === 1 && p?.result?.positionOverall === 1 && p?.bestLap?.rankOverall === 1;
+        const relevantLaps = p => Number(p?.leadership?.relevantLapsOverall || 0);
+        return {
+            grandChelem: candidates.find(p => overallHat(p) && relevantLaps(p) > 0 && p.leadership.lapsLedOverall === relevantLaps(p)) || null,
+            hatTrick: candidates.find(overallHat) || null,
+            bestLap: asc(p => Number(p?.bestLap?.time)),
+            pole: asc(p => Number(p?.qualifying?.positionOverall)),
+            overtakes: desc(p => Number(p?.overtakes?.madeOverall)),
+            start: desc(p => Number(p?.start?.deltaOverall)),
+            leadership: desc(p => Number(p?.leadership?.lapsLedOverall)),
+            regularity: asc(p => Number(p?.pace?.regularity))
+        };
+    }
+
+    function championshipSnapshotRows(snapshot, officialPilotUids) {
+        return getOfficialMetricCandidates(snapshot?.positions || snapshot?.drivers || [], officialPilotUids)
+            .sort((a, b) => Number(a.positionChampionship || Infinity) - Number(b.positionChampionship || Infinity))
+            .map(item => ({ ...item, displayPosition: item.positionOverall, displayDelta: item.positionDeltaOverall }));
     }
     function calcularRegularidade(voltas) {
         const grupos = new Map();
@@ -166,5 +203,5 @@
             }
         };
     }
-    return { VERSION, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, processarVoltasEtapa, consolidarPilotAnalytics };
+    return { VERSION, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, processarVoltasEtapa, consolidarPilotAnalytics, getOfficialMetricCandidates, buildStageHighlights, championshipSnapshotRows };
 }));
