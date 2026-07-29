@@ -5787,7 +5787,7 @@ function dashboardTabelaGeral(ranking, geral) {
             <div class="dashboard-section-title" style="margin-top:0;"><h3>🏆 Classificação do Campeonato</h3><span>${ranking.length} piloto(s)</span></div>
             <div class="dashboard-table-wrap">
                 <table class="dashboard-table">
-                    <tr><th class="dashboard-sticky-identity">Pos&nbsp;&nbsp;Piloto</th><th>Nome</th><th>Pts</th><th>Vit</th><th>Pódios</th><th>Poles</th><th>MV</th></tr>
+                    <tr><th class="dashboard-sticky-identity">Pos&nbsp;&nbsp;Piloto</th><th>Nome</th><th>Pts</th><th>Vit</th><th>Pódios</th><th>Poles</th><th>MV</th><th>Ações</th></tr>
                     ${ranking.map((p, idx) => {
                         const key = dashboardPilotoKey(p);
                         const medalha = ["🥇", "🥈", "🥉"][idx] || "";
@@ -5799,6 +5799,7 @@ function dashboardTabelaGeral(ranking, geral) {
                             <td>${geral.podios.get(key)?.total || 0}</td>
                             <td>${geral.poles.get(key)?.total || 0}</td>
                             <td>${geral.mvs.get(key)?.total || 0}</td>
+                            <td><button class="btn-view" onclick="openPilotDashboard({ pilotUid: '${htmlEscape(getPilotUid(p))}', campeonatoId: '${htmlEscape(DASHBOARD_STAGE_STATE.campeonatoId || document.getElementById("filtro_rank_firebase_camp")?.value || "")}', etapaId: null })">Detalhes</button></td>
                         </tr>`;
                     }).join("")}
                 </table>
@@ -5808,46 +5809,46 @@ function dashboardTabelaGeral(ranking, geral) {
 }
 
 function dashboardTabelaEtapa(stat) {
-    const classMap = new Map(stat.classificacao.map((p, idx) => [dashboardPilotoKey(p), { piloto: p, pos: idx + 1 }]));
+    const classMap = new Map(stat.classificacao.map((p, idx) => [dashboardPilotoKey(p), {
+        piloto: p,
+        positionChampionship: Number(p.positionChampionship || p.posicao_final2 || idx + 1),
+        positionOverall: Number(p.positionOverall || p.posicao_geral_arquivo || p.posicao_final || p.posicao || idx + 1),
+        bestLap: p.qualifying?.bestLap ?? p.melhor_tempo ?? null,
+        poleBonus: Number(p.scoring?.poleBonus ?? p.melhor_tempo_ponto ?? p.pontos ?? 0)
+    }]));
     return `
         <div class="dashboard-table-card">
             <div class="dashboard-section-title" style="margin-top:0;"><h3>🏁 Resultado da Etapa</h3><span>${stat.corrida.length} piloto(s)</span></div>
             <div class="dashboard-table-wrap">
                 <table class="dashboard-table stage-table">
-                    <tr><th class="dashboard-sticky-pos">Pos</th><th>Piloto</th><th>Nome</th><th>Grid</th><th>Kart</th><th>Voltas</th><th>Melhor Volta</th><th>Total</th><th>Pts</th></tr>
+                    <tr><th class="dashboard-sticky-pos">Pos</th><th>Piloto</th><th>Nome</th><th>Grid</th><th>Kart</th><th>Voltas</th><th>Melhor Volta</th><th>Total</th><th>Pts Base</th><th>Bônus MV</th><th>Bônus Grid</th><th>Pts</th><th>Ações</th></tr>
                     ${stat.corrida.map((p, idx) => {
-                        const grid = classMap.get(dashboardPilotoKey(p))?.pos || "-";
-                        const pts = Number(p.pontos || 0) + Number(p.melhor_tempo_ponto || 0);
+                        const qualifying = classMap.get(dashboardPilotoKey(p));
+                        const grid = qualifying?.positionChampionship || "-";
+                        const base = Number(p.scoring?.base ?? p.pontos ?? 0);
+                        const fastestLapBonus = Number(p.scoring?.fastestLapBonus ?? p.melhor_tempo_ponto ?? 0);
+                        const poleBonus = Number(p.scoring?.poleBonus ?? qualifying?.poleBonus ?? 0);
+                        const pts = Number(p.scoring?.total ?? (base + fastestLapBonus + poleBonus));
+                        const known = base + fastestLapBonus + poleBonus;
+                        const otherBonus = pts - known;
+                        const pointsTitle = otherBonus ? `Outros bônus persistidos: ${otherBonus > 0 ? "+" : ""}${otherBonus}` : "Pontos base + bônus MV + bônus Grid";
                         const medalha = ["🥇", "🥈", "🥉"][idx] || "";
                         return `<tr class="${idx < 3 ? `stage-result-top stage-result-top-${idx + 1}` : ""}">
                             <td class="dashboard-sticky-pos"><strong>${medalha} ${idx + 1}º</strong></td>
                             <td>${dashboardMiniAvatar(p)}</td>
-                            <td><strong>${htmlEscape(dashboardNomePiloto(p))}</strong></td>
-                            <td>${grid}</td>
+                            <td><button class="dashboard-name-link" onclick="openPilotDashboard({ pilotUid: '${htmlEscape(getPilotUid(p))}', campeonatoId: '${htmlEscape(DASHBOARD_STAGE_STATE.campeonatoId)}', etapaId: null })">${htmlEscape(dashboardNomePiloto(p))}</button></td>
+                            <td><div class="grid-result" title="Grid campeonato: P${grid} · Grid geral: P${qualifying?.positionOverall || "-"} · Tempo: ${htmlEscape(qualifying?.bestLap || "—")}"><strong>${grid}</strong><small>${htmlEscape(qualifying?.bestLap || "—")}</small></div></td>
                             <td>${htmlEscape(p.kart_numero || "-")}</td>
                             <td>${htmlEscape(p.voltas ?? "-")}</td>
                             <td>${htmlEscape(p.melhor_tempo || "-")}</td>
                             <td>${htmlEscape(p.total_tempo || "-")}</td>
-                            <td><strong>${pts}</strong></td>
+                            <td>${base}</td>
+                            <td>${fastestLapBonus ? `+${fastestLapBonus}` : "—"}</td>
+                            <td>${poleBonus ? `+${poleBonus}` : "—"}</td>
+                            <td title="${htmlEscape(pointsTitle)}"><strong>${pts}</strong>${otherBonus ? `<small class="other-bonus">outros ${otherBonus > 0 ? "+" : ""}${otherBonus}</small>` : ""}</td>
+                            <td><button class="btn-view" onclick="openRaceDetails({ pilotUid: '${htmlEscape(getPilotUid(p))}', campeonatoId: '${htmlEscape(DASHBOARD_STAGE_STATE.campeonatoId)}', etapaId: '${htmlEscape(DASHBOARD_STAGE_STATE.etapaId)}' })">Detalhes</button></td>
                         </tr>`;
                     }).join("")}
-                </table>
-            </div>
-        </div>
-        <div class="dashboard-table-card">
-            <div class="dashboard-section-title" style="margin-top:0;"><h3>⏱️ Classificação / Tomada</h3><span>${stat.classificacao.length} piloto(s)</span></div>
-            <div class="dashboard-table-wrap">
-                <table class="dashboard-table stage-table classification-table">
-                    <tr><th class="dashboard-sticky-pos">Pos</th><th>Piloto</th><th>Nome</th><th>Kart</th><th>Melhor Volta</th><th>Voltas</th><th>Bônus</th></tr>
-                    ${stat.classificacao.map((p, idx) => `<tr>
-                        <td class="dashboard-sticky-pos"><strong>${idx + 1}º</strong></td>
-                        <td>${dashboardMiniAvatar(p)}</td>
-                        <td><strong>${htmlEscape(dashboardNomePiloto(p))}</strong></td>
-                        <td>${htmlEscape(p.kart_numero || "-")}</td>
-                        <td>${htmlEscape(p.melhor_tempo || "-")}</td>
-                        <td>${htmlEscape(p.voltas ?? "-")}</td>
-                        <td>${Number(p.melhor_tempo_ponto || p.pontos || 0)}</td>
-                    </tr>`).join("")}
                 </table>
             </div>
         </div>
@@ -5956,13 +5957,10 @@ async function renderDashboardCampeonato() {
 
         if (filtroEtapa === "geral") {
             const geral = dashboardEstatisticasGeral(payload, ranking);
-            const leaderPodium = ranking.slice(0, 3);
             content.innerHTML = `
                 ${dashboardHero(payload, ranking)}
                 <div class="dashboard-section-title"><h3>⭐ Destaques do Campeonato</h3><span>acumulado de todas as etapas</span></div>
                 <div class="dashboard-cards">${dashboardCardsGeral(geral)}</div>
-                <div class="dashboard-section-title"><h3>🥇 Top 3 do Campeonato</h3><span>classificação por pontos</span></div>
-                ${dashboardPodium(leaderPodium, true)}
                 ${dashboardTabelaGeral(ranking, geral)}
                 <div class="dashboard-note">Ultrapassagens, largada, voltas lideradas e regularidade são calculadas quando o arquivo Volta a volta está disponível. Regularidade usa voltas limpas: exclui a volta 1, voltas muito lentas e possíveis voltas anormalmente rápidas.</div>
             `;
@@ -7057,8 +7055,6 @@ async function renderDashboardCampeonato() {
                 ${dashboardHero(payload, ranking)}
                 <div class="dashboard-section-title"><h3>⭐ Destaques do Campeonato</h3><span>dados pré-calculados e persistidos</span></div>
                 <div class="dashboard-cards">${dashboardCardsGeral(geral)}</div>
-                <div class="dashboard-section-title"><h3>🥇 Top 3 do Campeonato</h3><span>classificação por pontos</span></div>
-                ${dashboardPodium(ranking.slice(0, 3), true)}
                 ${dashboardTabelaGeral(ranking, geral)}
                 <div class="dashboard-note">A home apenas consulta os resumos salvos no Firestore. Os cálculos são refeitos e persistidos somente ao importar/reprocessar arquivos.</div>
             `;
@@ -7330,7 +7326,7 @@ function voltaAnterior(){RACE_SNAPSHOT_INDEX=Math.max(0,RACE_SNAPSHOT_INDEX-1);r
 function playRaceAnimation(){if(RACE_PLAY_TIMER){pauseRaceAnimation();return;} const btn=document.getElementById('racePlay');if(btn)btn.textContent='⏸ Pausar';RACE_PLAY_TIMER=setInterval(()=>{const n=ETAPA_ANALYTICS_ATUAL?.snapshots?.length||0;if(RACE_SNAPSHOT_INDEX>=n-1){pauseRaceAnimation();return;}proximaVolta();},1000);}
 function pauseRaceAnimation(){if(RACE_PLAY_TIMER)clearInterval(RACE_PLAY_TIMER);RACE_PLAY_TIMER=null;const btn=document.getElementById('racePlay');if(btn)btn.textContent='▶ Reproduzir';}
 function renderUltrapassagensChart(mode='campeonato') {
-    OVERTAKE_MODE=mode; const source=ETAPA_ANALYTICS_ATUAL?.[mode==='campeonato'?'ultrapassagensCampeonato':'ultrapassagensGeral']||[], items=mode==='campeonato'?DriverIdentity.reconcileStageChampionshipDrivers(source,pilotosOficiaisAtuais(),driver=>({...driver,isChampionship:true,feitas:0,tomadas:0,saldo:0})):source, alvo=document.getElementById('overtakeChart'); if(!alvo)return;
+    OVERTAKE_MODE=mode; const source=ETAPA_ANALYTICS_ATUAL?.[mode==='campeonato'?'ultrapassagensCampeonato':'ultrapassagensGeral']||[], reconciled=mode==='campeonato'?DriverIdentity.reconcileStageChampionshipDrivers(source,pilotosOficiaisAtuais(),driver=>({...driver,isChampionship:true,feitas:0,tomadas:0,saldo:0})):source, items=[...reconciled].sort((a,b)=>getDriverFullDisplayName(a).localeCompare(getDriverFullDisplayName(b),'pt-BR',{sensitivity:'base'})), alvo=document.getElementById('overtakeChart'); if(!alvo)return;
     document.getElementById('overtakeChamp')?.classList.toggle('selected',mode==='campeonato'); document.getElementById('overtakeAll')?.classList.toggle('selected',mode==='geral');
     const max=Math.max(1,...items.flatMap(i=>[i.feitas,i.tomadas]));
     alvo.innerHTML=items.length ? `<div class="overtake-head"><span>Piloto</span><span>Feitas</span><span>Tomadas</span></div>`+items.map(i=>`<div class="metric-row overtake" title="${htmlEscape(getDriverFullDisplayName(i))}"><span>${htmlEscape(getDriverShortName(i))}</span><span class="overtake-bar"><i class="made" style="width:${i.feitas/max*100}%"></i><b>+${i.feitas}</b></span><span class="overtake-bar"><i class="lost" style="width:${i.tomadas/max*100}%"></i><b>-${i.tomadas}</b></span></div>`).join('') : '<div class="analytics-state">Sem transições suficientes.</div>';
