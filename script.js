@@ -5337,7 +5337,7 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
     }
 
     const official = values => [...values].filter(v => officialPilotUids.has(getPilotUid(v.piloto)));
-    const topUltrapassagens = official(ultrapassagens.values()).sort((a, b) => b.total - a.total || dashboardNomePiloto(a.piloto).localeCompare(dashboardNomePiloto(b.piloto)))[0] || null;
+    const topUltrapassagens = official(ultrapassagens.values()).filter(v => v.total > 0).sort((a, b) => b.total - a.total || dashboardNomePiloto(a.piloto).localeCompare(dashboardNomePiloto(b.piloto)))[0] || null;
     const topLideradas = official(lideradas.values()).filter(v => v.total > 0).sort((a, b) => b.total - a.total || dashboardNomePiloto(a.piloto).localeCompare(dashboardNomePiloto(b.piloto)))[0] || null;
     const topRegularidade = official(regularidade.values()).filter(v => Number.isFinite(v.desvio) && v.desvio >= 0 && v.status === "ok" && v.limpas >= KartAnalytics.MIN_CLEAN_LAPS).sort((a, b) => a.desvio - b.desvio)[0] || null;
 
@@ -5606,8 +5606,9 @@ function dashboardEstatisticasGeral(payload, ranking) {
     };
 }
 
-function dashboardCard({ titulo, piloto = null, valor = "-", descricao = "", vazio = false }) {
-    const nome = piloto ? dashboardNomePiloto(piloto) : "Meta não atingida";
+function dashboardCard({ titulo, piloto = null, valor = "-", descricao = "", vazio = false, indisponivel = false }) {
+    const nome = piloto ? dashboardNomePiloto(piloto) : (indisponivel ? "Dados indisponíveis" : "Meta não atingida");
+    if (indisponivel) console.warn("[Kart/Highlights] métrica sem dados", { titulo, descricao });
     return `
         <div class="dashboard-card">
             <div class="dashboard-card-title">${titulo}</div>
@@ -5656,21 +5657,24 @@ function dashboardCardsEtapa(stat) {
             piloto: stat.melhorVolta?.piloto,
             valor: stat.melhorVolta ? dashboardFormatarTempoSegundos(stat.melhorVolta.tempo) : "-",
             descricao: "Volta mais rápida da etapa",
-            vazio: !stat.melhorVolta
+            vazio: !stat.melhorVolta,
+            indisponivel: !stat.melhorVolta && !stat.completo?.volta_a_volta
         }),
         dashboardCard({
             titulo: "🎯 Pole Position",
             piloto: stat.pole,
             valor: stat.pole?.melhor_tempo || "-",
             descricao: "Melhor posição da classificação",
-            vazio: !stat.pole
+            vazio: !stat.pole,
+            indisponivel: !stat.pole && !stat.completo?.classificacao
         }),
         dashboardCard({
             titulo: "🚀 + Ultrapassagens",
             piloto: m.topUltrapassagens?.piloto,
             valor: m.topUltrapassagens ? `${m.topUltrapassagens.total} posições` : "-",
             descricao: "Maior soma de posições ganhas volta a volta",
-            vazio: !m.topUltrapassagens
+            vazio: !m.topUltrapassagens,
+            indisponivel: !m.topUltrapassagens && !stat.completo?.volta_a_volta
         }),
         dashboardCard({
             titulo: "🏁 Melhor Largada",
@@ -5691,7 +5695,8 @@ function dashboardCardsEtapa(stat) {
             piloto: m.topRegularidade?.piloto,
             valor: m.topRegularidade ? `±${m.topRegularidade.desvio.toFixed(3)}s` : "-",
             descricao: m.topRegularidade ? `Desvio das voltas limpas · pace ${dashboardFormatarTempoSegundos(m.topRegularidade.pace)}` : "São necessárias ao menos 5 voltas limpas",
-            vazio: !m.topRegularidade
+            vazio: !m.topRegularidade,
+            indisponivel: !m.topRegularidade && !stat.completo?.volta_a_volta
         })
     ].join("");
 }
@@ -6432,7 +6437,7 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
     const voltasCanonicas = voltasResolvidas.rows.map(row => ({ ...row, isChampionship: oficiaisEtapa.uids.has(getPilotUid(row)) }));
     // Preserve the complete race. Championship membership is persisted as a
     // flag and filtering is exclusively a presentation concern.
-    const etapaObj = { docId: resultadoDocId, ref: resultadoDocRef, meta, corrida, classificacao, voltas: voltasCanonicas };
+    const etapaObj = { docId: resultadoDocId, ref: resultadoDocRef, meta, corrida, classificacao, voltas: voltasCanonicas, officialPilotUids: oficiaisEtapa.uids };
     const stat = dashboardEstatisticasEtapa(etapaObj);
     const resumo = dashboardSerializarEstatisticasEtapa(stat, {
         resultado_final: meta.resultadoFinalResumo?.idImportacao || "",
@@ -6548,21 +6553,48 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     const pilotAnalytics = montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta);
     const officialPilotUids = new Set(pilotosLista.map(getPilotUid).filter(Boolean));
     const stageHighlights = KartAnalytics.buildStageHighlights(pilotAnalytics, officialPilotUids);
-    console.table(KartAnalytics.getOfficialHighlightCandidates({ analytics: pilotAnalytics, officialPilotUids }).map(p => ({
-        Nome: p.driver_name || p.nome || "",
+    const normalizedAnalytics = pilotAnalytics.map(KartAnalytics.normalizePilotAnalyticsForHighlights);
+    const officialAnalytics = KartAnalytics.getOfficialHighlightCandidates({ analytics: normalizedAnalytics, officialPilotUids });
+    const analyticsUids = new Set(normalizedAnalytics.map(p => p.pilot_uid).filter(Boolean));
+    console.group(`[Kart/Highlights Diagnostic] Etapa ${meta?.etapa || "-"}`);
+    console.log("officialPilotUids", [...officialPilotUids]);
+    console.log({
+        officialCount: officialPilotUids.size,
+        analyticsCount: normalizedAnalytics.length,
+        matchedCount: officialAnalytics.length,
+        missingAnalytics: [...officialPilotUids].filter(uid => !analyticsUids.has(uid)),
+        extraAnalytics: [...analyticsUids].filter(uid => !officialPilotUids.has(uid))
+    });
+    console.table(normalizedAnalytics.map(p => ({
+        pilot_uid: p.pilot_uid, driver_id: p.driver_id || null,
+        nome: p.name, isOfficial: officialPilotUids.has(p.pilot_uid),
+        bestLap: p.race.bestLap,
+        qualifyingPositionOverall: p.qualifying.positionOverall,
+        qualifyingPositionChampionship: p.qualifying.positionChampionship,
+        overtakesMadeOverall: p.overtakes.madeOverall,
+        startDeltaOverall: p.start.deltaOverall,
+        firstLapMadeOverall: p.firstLapOvertakes.madeOverall,
+        lapsLedOverall: p.leadership.lapsLedOverall,
+        regularity: p.pace.regularity, regularityStatus: p.pace.status,
+        cleanLaps: p.pace.cleanLaps
+    })));
+    console.table(officialAnalytics.map(p => ({
+        Nome: p.name,
         pilot_uid: p.pilot_uid,
         Official: true,
         "Grid Overall": p.start?.gridPositionOverall ?? null,
         "First Lap Overall": p.start?.firstLapPositionOverall ?? null,
         "Delta Overall": p.start?.deltaOverall ?? null,
-        "First Lap Made": p.overtakes?.firstLapMadeOverall ?? null,
-        "First Lap Taken": p.overtakes?.firstLapTakenOverall ?? null,
+        "First Lap Made": p.firstLapOvertakes?.madeOverall ?? null,
+        "First Lap Taken": p.firstLapOvertakes?.takenOverall ?? null,
         "Overtakes Made Overall": p.overtakes?.madeOverall ?? null,
         "Laps Led Overall": p.leadership?.lapsLedOverall ?? null,
         Regularity: p.pace?.regularity ?? null,
-        "Best Lap": p.bestLap?.time ?? null,
-        "Qualifying Overall": p.qualifying?.positionOverall ?? null
+        "Best Lap": p.race?.bestLap ?? null,
+        "Qualifying Overall": p.qualifying?.positionOverall ?? null,
+        "Qualifying Championship": p.qualifying?.positionChampionship ?? null
     })));
+    console.groupEnd();
     const [participantesAntigos, voltasAntigas, pilotosAnalyticsAntigos] = await Promise.all([
         resultadoDocRef.collection("participantes_etapa").get(),
         resultadoDocRef.collection("voltas_processadas").get(),
@@ -6713,6 +6745,52 @@ async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeona
 
     const ranking = dashboardRankingDasEtapasPersistidas(stats);
     const geral = dashboardEstatisticasGeral({ etapasStats: stats }, ranking);
+    // Championship highlights are rebuilt from stage Pilot Analytics. They do
+    // not inherit possibly empty highlights written by an older application.
+    const stageAnalytics = [];
+    for (const stage of snapshot.docs) {
+        const analyticsSnap = await stage.ref.collection("pilot_analytics").get();
+        stageAnalytics.push({
+            etapa: Number((stage.data() || {}).etapa || 0),
+            etapa_id: stage.id,
+            analytics: analyticsSnap.docs.map(doc => ({ ...(doc.data() || {}), _documentId: doc.id }))
+        });
+    }
+    const officialPilotUids = new Set(ranking.map(getPilotUid).filter(Boolean));
+    const championshipHighlights = KartAnalytics.buildChampionshipHighlights(stageAnalytics, officialPilotUids);
+    const allAnalytics = stageAnalytics.flatMap(stage => stage.analytics);
+    const normalized = allAnalytics.map(KartAnalytics.normalizePilotAnalyticsForHighlights);
+    const matched = KartAnalytics.getOfficialHighlightCandidates({ analytics: normalized, officialPilotUids });
+    const analyticsUids = new Set(normalized.map(row => row.pilot_uid).filter(Boolean));
+    console.group("[Kart/Highlights Diagnostic] Campeonato Geral");
+    console.log("officialPilotUids", [...officialPilotUids]);
+    console.log({ officialCount: officialPilotUids.size, analyticsCount: normalized.length, matchedCount: matched.length,
+        missingAnalytics: [...officialPilotUids].filter(uid => !analyticsUids.has(uid)),
+        extraAnalytics: [...analyticsUids].filter(uid => !officialPilotUids.has(uid)) });
+    console.table(normalized.map(p => ({ pilot_uid: p.pilot_uid, driver_id: p.driver_id || null, nome: p.name,
+        isOfficial: officialPilotUids.has(p.pilot_uid), bestLap: p.race.bestLap,
+        qualifyingPositionOverall: p.qualifying.positionOverall, qualifyingPositionChampionship: p.qualifying.positionChampionship,
+        overtakesMadeOverall: p.overtakes.madeOverall, startDeltaOverall: p.start.deltaOverall,
+        firstLapMadeOverall: p.firstLapOvertakes.madeOverall, lapsLedOverall: p.leadership.lapsLedOverall,
+        regularity: p.pace.regularity, regularityStatus: p.pace.status, cleanLaps: p.pace.cleanLaps })));
+    console.log("Highlights", championshipHighlights);
+    console.groupEnd();
+
+    const pilot = row => row || null;
+    if (championshipHighlights.bestLap) geral.melhorVoltaAbsoluta = {
+        piloto: pilot(championshipHighlights.bestLap), tempo: championshipHighlights.bestLap.race.bestLap,
+        etapa: { docId: championshipHighlights.bestLap.etapa_id || "", meta: { etapa: championshipHighlights.bestLap._stage || championshipHighlights.bestLap.etapa || "" } }
+    };
+    if (championshipHighlights.overtakes) geral.topUltrapassagens = { piloto: pilot(championshipHighlights.overtakes), total: championshipHighlights.overtakes.overtakes.madeOverall };
+    if (championshipHighlights.start) geral.melhorLargada = {
+        piloto: pilot(championshipHighlights.start), ganho: championshipHighlights.start.start.deltaOverall,
+        grid: championshipHighlights.start.start.gridPositionOverall,
+        posVolta1: championshipHighlights.start.start.firstLapPositionOverall,
+        etapa: { docId: championshipHighlights.start.etapa_id || "", meta: { etapa: championshipHighlights.start._stage || championshipHighlights.start.etapa || "" } }
+    };
+    geral.topLideradas = championshipHighlights.leadership ? { piloto: pilot(championshipHighlights.leadership), total: championshipHighlights.leadership.leadership.lapsLedOverall } : null;
+    geral.topRegularidade = championshipHighlights.regularity ? { piloto: pilot(championshipHighlights.regularity), media: championshipHighlights.regularity.pace.regularity, valores: [] } : null;
+    geral.topPoles = championshipHighlights.pole ? { piloto: pilot(championshipHighlights.pole), total: championshipHighlights.pole.poleCount || 1 } : null;
     const resumoGeral = dashboardSerializarGeral(geral, ranking, stats);
 
     const pilotSummaryCount = await persistirPilotSummariesCampeonato(campRef, campeonatoDocId);

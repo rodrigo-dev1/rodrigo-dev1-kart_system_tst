@@ -4,13 +4,72 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 10;
+    const VERSION = 11;
     const MIN_CLEAN_LAPS = 2;
     const num = value => {
         if (value === null || value === undefined || value === "") return null;
         const n = Number(value);
         return Number.isFinite(n) ? n : null;
     };
+    const normalizePilotUid = value => String(value ?? "").trim();
+    const pick = (...values) => values.find(value => value !== null && value !== undefined && value !== "");
+    const invalidStatuses = new Set(["invalid", "insufficient", "error", "voltas_insuficientes"]);
+    const regularityIsValid = pace => {
+        const status = String(pace?.status ?? "").trim().toLowerCase();
+        return num(pace?.regularity) >= 0 && num(pace?.cleanLaps) >= MIN_CLEAN_LAPS && !invalidStatuses.has(status);
+    };
+
+    /** Read-only transition adapter. It never calculates a metric and never
+     * treats a Firestore document id as pilot_uid. */
+    function normalizePilotAnalyticsForHighlights(raw = {}) {
+        const pilot_uid = normalizePilotUid(pick(raw.pilot_uid, raw.pilotUid));
+        return {
+            ...raw,
+            pilot_uid,
+            name: pick(raw.name, raw.driver_name_display, raw.driver_name, raw.nome) || "",
+            result: {
+                positionOverall: num(pick(raw.result?.positionOverall, raw.positionOverall, raw.posicao_geral_arquivo)),
+                positionChampionship: num(pick(raw.result?.positionChampionship, raw.positionChampionship, raw.posicao_campeonato))
+            },
+            qualifying: {
+                positionOverall: num(pick(raw.qualifying?.positionOverall, raw.qualifyingPositionOverall, raw.posicao_classificacao_geral)),
+                positionChampionship: num(pick(raw.qualifying?.positionChampionship, raw.qualifyingPositionChampionship, raw.posicao_classificacao_campeonato))
+            },
+            race: {
+                bestLap: num(pick(raw.race?.bestLap, raw.bestLap?.time, raw.bestLap, raw.melhorVolta, raw.pace?.bestLap)),
+                bestLapRankOverall: num(pick(raw.race?.bestLapRankOverall, raw.bestLap?.rankOverall, raw.bestLapRankOverall)),
+                bestLapRankChampionship: num(pick(raw.race?.bestLapRankChampionship, raw.bestLap?.rankChampionship, raw.bestLapRankChampionship))
+            },
+            start: {
+                gridPositionOverall: num(pick(raw.start?.gridPositionOverall, raw.gridPositionOverall)),
+                firstLapPositionOverall: num(pick(raw.start?.firstLapPositionOverall, raw.firstLapPositionOverall)),
+                deltaOverall: num(pick(raw.start?.deltaOverall, raw.startDeltaOverall)),
+                gridPositionChampionship: num(pick(raw.start?.gridPositionChampionship, raw.gridPositionChampionship)),
+                firstLapPositionChampionship: num(pick(raw.start?.firstLapPositionChampionship, raw.firstLapPositionChampionship)),
+                deltaChampionship: num(pick(raw.start?.deltaChampionship, raw.startDeltaChampionship))
+            },
+            firstLapOvertakes: {
+                madeOverall: num(pick(raw.firstLapOvertakes?.madeOverall, raw.overtakes?.firstLapMadeOverall, raw.firstLapMadeOverall)),
+                takenOverall: num(pick(raw.firstLapOvertakes?.takenOverall, raw.overtakes?.firstLapTakenOverall, raw.firstLapTakenOverall)),
+                balanceOverall: num(pick(raw.firstLapOvertakes?.balanceOverall, raw.overtakes?.firstLapBalanceOverall, raw.firstLapBalanceOverall))
+            },
+            overtakes: {
+                madeOverall: num(pick(raw.overtakes?.madeOverall, raw.overtakesMadeOverall, raw.ultrapassagensFeitas)),
+                takenOverall: num(pick(raw.overtakes?.takenOverall, raw.overtakesTakenOverall, raw.ultrapassagensTomadas)),
+                balanceOverall: num(pick(raw.overtakes?.balanceOverall, raw.overtakesBalanceOverall, raw.saldoUltrapassagens))
+            },
+            leadership: {
+                lapsLedOverall: num(pick(raw.leadership?.lapsLedOverall, raw.lapsLedOverall, raw.voltasLideradas)),
+                relevantLapsOverall: num(pick(raw.leadership?.relevantLapsOverall, raw.relevantLapsOverall))
+            },
+            pace: {
+                pace: num(pick(raw.pace?.pace, raw.paceValue)),
+                regularity: num(pick(raw.pace?.regularity, raw.regularity, raw.regularidade, raw.analytics?.regularidade?.regularity)),
+                cleanLaps: num(pick(raw.pace?.cleanLaps, raw.cleanLaps, raw.cleanLapsCount)),
+                status: pick(raw.pace?.status, raw.regularityStatus, raw.status) ?? null
+            }
+        };
+    }
     const identity = typeof DriverIdentity !== "undefined" ? DriverIdentity : require("./driver_identity.js");
     const normalizeDriverId = identity.normalizeDriverId;
     const key = item => identity.driverKey(item);
@@ -38,46 +97,58 @@
     }
 
     function officialUidSet(officialPilotUids) {
-        return officialPilotUids instanceof Set ? officialPilotUids : new Set(officialPilotUids || []);
+        return new Set([...(officialPilotUids instanceof Set ? officialPilotUids : new Set(officialPilotUids || []))].map(normalizePilotUid).filter(Boolean));
     }
 
     /** Metrics are already calculated against the complete race here.  This
      * helper only restricts who is eligible to be presented as a winner. */
     function getOfficialHighlightCandidates({ analytics, officialPilotUids }) {
         const official = officialUidSet(officialPilotUids);
-        return (analytics || []).filter(item => official.has(String(identity.getPilotUid(item) || item?.pilot_uid || "")));
+        return (analytics || []).map(normalizePilotAnalyticsForHighlights).filter(item => item.pilot_uid && official.has(item.pilot_uid));
     }
 
     const getOfficialMetricCandidates = (analytics, officialPilotUids) =>
         getOfficialHighlightCandidates({ analytics, officialPilotUids });
 
-    function validateHighlights(highlights, officialPilotUids) {
+    function validateHighlights({ highlights, officialPilotUids, officialAnalytics = [] }) {
         const official = officialUidSet(officialPilotUids);
-        return Object.fromEntries(Object.entries(highlights).map(([highlightType, highlight]) => {
+        const validated = Object.fromEntries(Object.entries(highlights).map(([highlightType, highlight]) => {
             if (!highlight) return [highlightType, null];
             const pilot_uid = String(identity.getPilotUid(highlight) || highlight.pilot_uid || "");
             if (official.has(pilot_uid)) return [highlightType, highlight];
             console.error("[Kart/Highlights] piloto externo selecionado", { highlightType, pilot_uid, name: identity.getDriverName(highlight) });
             return [highlightType, null];
         }));
+        const rows = (officialAnalytics || []).map(normalizePilotAnalyticsForHighlights).filter(p => official.has(p.pilot_uid));
+        const required = [
+            ["bestLap", rows.some(p => num(p.race.bestLap) > 0)],
+            ["overtakes", rows.some(p => num(p.overtakes.madeOverall) > 0)],
+            ["start", rows.some(p => num(p.start.deltaOverall) > 0)],
+            ["regularity", rows.some(p => regularityIsValid(p.pace))],
+            ["pole", rows.some(p => num(p.qualifying.positionChampionship) === 1)]
+        ];
+        const missing = required.filter(([key, hasCandidate]) => hasCandidate && !validated[key]).map(([key]) => key);
+        if (missing.length) throw new Error(`[Kart/Highlights] candidatos válidos sem destaque: ${missing.join(", ")}`);
+        return validated;
     }
 
     function buildStageHighlights(allAnalytics, officialPilotUids) {
         const candidates = getOfficialMetricCandidates(allAnalytics, officialPilotUids);
         const asc = path => candidates.map(x => [x, path(x)]).filter(([, value]) => Number.isFinite(value)).sort((a, b) => a[1] - b[1])[0]?.[0] || null;
         const desc = (path, positive = false) => candidates.map(x => [x, path(x)]).filter(([, value]) => Number.isFinite(value) && (!positive || value > 0)).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-        const overallHat = p => p?.qualifying?.positionOverall === 1 && p?.result?.positionOverall === 1 && p?.bestLap?.rankOverall === 1;
+        const overallHat = p => p?.qualifying?.positionOverall === 1 && p?.result?.positionOverall === 1 && p?.race?.bestLapRankOverall === 1;
         const relevantLaps = p => Number(p?.leadership?.relevantLapsOverall || 0);
-        return validateHighlights({
+        const highlights = {
             grandChelem: candidates.find(p => overallHat(p) && relevantLaps(p) > 0 && p.leadership.lapsLedOverall === relevantLaps(p)) || null,
             hatTrick: candidates.find(overallHat) || null,
-            bestLap: asc(p => num(p?.bestLap?.time)),
-            pole: asc(p => num(p?.qualifying?.positionOverall)),
-            overtakes: desc(p => num(p?.overtakes?.madeOverall)),
+            bestLap: asc(p => num(p?.race?.bestLap) > 0 ? num(p.race.bestLap) : null),
+            pole: candidates.find(p => num(p?.qualifying?.positionChampionship) === 1) || null,
+            overtakes: desc(p => num(p?.overtakes?.madeOverall), true),
             start: desc(p => num(p?.start?.deltaOverall), true),
             leadership: desc(p => num(p?.leadership?.lapsLedOverall), true),
-            regularity: asc(p => p?.pace?.status === "ok" && num(p?.pace?.cleanLaps) >= MIN_CLEAN_LAPS ? num(p?.pace?.regularity) : null)
-        }, officialPilotUids);
+            regularity: asc(p => regularityIsValid(p?.pace) ? num(p.pace.regularity) : null)
+        };
+        return validateHighlights({ highlights, officialPilotUids, officialAnalytics: candidates });
     }
 
     function buildChampionshipHighlights(stageSummaries, officialPilotUids) {
@@ -91,13 +162,22 @@
             const aggregate = byPilot.get(uid);
             aggregate.overtakes.madeOverall += num(row.overtakes?.madeOverall) || 0;
             aggregate.leadership.lapsLedOverall += num(row.leadership?.lapsLedOverall) || 0;
-            if (row.pace?.status === "ok" && num(row.pace?.cleanLaps) >= MIN_CLEAN_LAPS && num(row.pace?.regularity) !== null) aggregate._regularities.push(num(row.pace.regularity));
+            if (regularityIsValid(row.pace)) aggregate._regularities.push(num(row.pace.regularity));
         });
         const aggregate = [...byPilot.values()].map(row => ({ ...row, pace: { ...row.pace, status: row._regularities.length ? "ok" : "voltas_insuficientes", cleanLaps: row._regularities.length ? MIN_CLEAN_LAPS : 0, regularity: mean(row._regularities) } }));
         const highlights = buildStageHighlights(aggregate, officialPilotUids);
+        const bestLaps = candidates.filter(row => num(row.race?.bestLap) > 0).sort((a, b) => num(a.race.bestLap) - num(b.race.bestLap));
+        highlights.bestLap = bestLaps[0] || null;
+        const poles = new Map();
+        candidates.filter(row => num(row.qualifying?.positionChampionship) === 1).forEach(row => {
+            const uid = row.pilot_uid;
+            if (!poles.has(uid)) poles.set(uid, { ...row, poleCount: 0 });
+            poles.get(uid).poleCount += 1;
+        });
+        highlights.pole = [...poles.values()].sort((a, b) => b.poleCount - a.poleCount)[0] || null;
         const positiveStarts = candidates.filter(row => num(row.start?.deltaOverall) > 0).sort((a, b) => num(b.start.deltaOverall) - num(a.start.deltaOverall));
         highlights.start = positiveStarts[0] || null;
-        return validateHighlights(highlights, officialPilotUids);
+        return validateHighlights({ highlights, officialPilotUids, officialAnalytics: candidates });
     }
 
     function championshipSnapshotRows(snapshot, officialPilotUids) {
@@ -281,5 +361,5 @@
             }
         };
     }
-    return { VERSION, MIN_CLEAN_LAPS, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, calculatePositionChangesBetweenSnapshots, processarVoltasEtapa, consolidarPilotAnalytics, getOfficialHighlightCandidates, getOfficialMetricCandidates, validateHighlights, buildStageHighlights, buildChampionshipHighlights, championshipSnapshotRows };
+    return { VERSION, MIN_CLEAN_LAPS, toNullableNumber: num, normalizePilotUid, normalizePilotAnalyticsForHighlights, regularityIsValid, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, calculatePositionChangesBetweenSnapshots, processarVoltasEtapa, consolidarPilotAnalytics, getOfficialHighlightCandidates, getOfficialMetricCandidates, validateHighlights, buildStageHighlights, buildChampionshipHighlights, championshipSnapshotRows };
 }));

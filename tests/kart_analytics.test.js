@@ -70,4 +70,40 @@ assert.equal(championship.start.start.deltaOverall, 4);
 assert.equal(championship.leadership, null);
 assert.equal(championship.regularity.pace.regularity, .5);
 
+const realistic = [
+    pilot("A", { race:{bestLap:60.516}, qualifying:{positionOverall:4,positionChampionship:1}, start:{deltaOverall:4}, firstLapOvertakes:{madeOverall:5,takenOverall:1,balanceOverall:4}, overtakes:{madeOverall:8}, leadership:{lapsLedOverall:0}, pace:{regularity:.444,cleanLaps:12} }),
+    pilot("B", { race:{bestLap:61}, qualifying:{positionChampionship:2}, start:{deltaOverall:1}, firstLapOvertakes:{madeOverall:2}, overtakes:{madeOverall:5}, leadership:{lapsLedOverall:0}, pace:{regularity:.5,cleanLaps:13,status:"ok"} }),
+    pilot("C", { race:{bestLap:62}, qualifying:{positionChampionship:3}, start:{deltaOverall:0}, firstLapOvertakes:{madeOverall:0}, overtakes:{madeOverall:1}, leadership:{lapsLedOverall:0}, pace:{regularity:.65,cleanLaps:10,status:"ok"} }),
+    pilot("X", { race:{bestLap:59}, qualifying:{positionChampionship:1}, start:{deltaOverall:8}, overtakes:{madeOverall:20}, pace:{regularity:.1,cleanLaps:20,status:"ok"} })
+];
+const realHighlights = analytics.buildStageHighlights(realistic, official);
+assert.equal(realHighlights.bestLap.pilot_uid, "A");
+assert.equal(realHighlights.bestLap.race.bestLap, 60.516);
+assert.equal(realHighlights.pole.pilot_uid, "A");
+assert.equal(realHighlights.overtakes.pilot_uid, "A");
+assert.equal(realHighlights.start.pilot_uid, "A");
+assert.equal(realHighlights.leadership, null);
+assert.equal(realHighlights.regularity.pilot_uid, "A", "legacy regularity without status remains valid");
+assert.equal(realHighlights.regularity.pace.regularity, .444);
+
+const championshipReal = analytics.buildChampionshipHighlights([
+    { etapa:1, analytics:[realistic[0], pilot("B", { race:{bestLap:60.9}, overtakes:{madeOverall:10}, start:{deltaOverall:3}, pace:{regularity:.42,cleanLaps:10} })] },
+    { etapa:2, analytics:[pilot("A", { race:{bestLap:61}, overtakes:{madeOverall:3}, start:{deltaOverall:-1}, pace:{regularity:.5,cleanLaps:12} })] }
+], official);
+assert.deepEqual(analytics.buildChampionshipHighlights([
+    { etapa:1, analytics:[realistic[0], pilot("B", { race:{bestLap:60.9}, overtakes:{madeOverall:10}, start:{deltaOverall:3}, pace:{regularity:.42,cleanLaps:10} })] },
+    { etapa:2, analytics:[pilot("A", { race:{bestLap:61}, overtakes:{madeOverall:3}, start:{deltaOverall:-1}, pace:{regularity:.5,cleanLaps:12} })] }
+], official), championshipReal, "same analytics produce identical highlights on a second reprocessing");
+assert.equal(championshipReal.bestLap.pilot_uid, "A");
+assert.equal(championshipReal.overtakes.pilot_uid, "A");
+assert.equal(championshipReal.overtakes.overtakes.madeOverall, 11);
+assert.equal(championshipReal.start.pilot_uid, "A");
+assert.equal(championshipReal.regularity.pilot_uid, "B");
+assert.equal(championshipReal.regularity.pace.regularity, .42);
+
+assert.equal(analytics.toNullableNumber(null), null);
+assert.equal(analytics.toNullableNumber(""), null);
+assert.equal(analytics.toNullableNumber("0"), 0);
+assert.equal(analytics.normalizePilotUid(" A "), "A");
+
 console.log("kart analytics: highlights/evolution passed; pilot index candidate count = 6");
