@@ -6471,10 +6471,13 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
             campeonato_id: meta?.campeonato_id || "", campeonato: meta?.campeonato || "", etapa_id: meta?.resultadoDocId || "", etapa: Number(meta?.etapa || 0), dataCorrida: meta?.dataCorrida || "",
             result: { positionOverall: resultOverall, positionChampionship: resultPosition, points: Number(result.pontos || 0) + Number(result.melhor_tempo_ponto || 0) },
             qualifying: { positionOverall: qualifyingOverall, positionChampionship: qualifyingPosition },
+            finish: { deltaOverall: qualifyingOverall && resultOverall ? qualifyingOverall - resultOverall : null, deltaChampionship: qualifyingPosition && resultPosition ? qualifyingPosition - resultPosition : null },
+            scoring: { total: Number(result.pontos || 0) + Number(result.melhor_tempo_ponto || 0) },
             start: { gridPositionOverall: gridOverall, firstLapPositionOverall: firstOverall, deltaOverall: gridOverall && firstOverall ? gridOverall - firstOverall : null, gridPositionChampionship: qualifyingPosition, firstLapPositionChampionship: firstChampionship, deltaChampionship: qualifyingPosition && firstChampionship ? qualifyingPosition - firstChampionship : null },
             pace: { bestLap: pace.bestLapValid ?? null, pace: pace.pace ?? null, regularity: pace.regularidade ?? null, cleanLaps: Number(pace.cleanLapsCount || 0), totalLaps: Number(pace.totalLaps || 0), status: pace.status || "voltas_insuficientes" },
             overtakes: { madeOverall: Number(overAll.feitas || 0), takenOverall: Number(overAll.tomadas || 0), balanceOverall: Number(overAll.saldo || 0), madeChampionship: Number(overCamp.feitas || 0), takenChampionship: Number(overCamp.tomadas || 0), balanceChampionship: Number(overCamp.saldo || 0) },
             bestLap: { time: pace.bestLapValid ?? null, rankOverall: bestOverallIndex >= 0 ? bestOverallIndex + 1 : null, rankChampionship: bestOverallIndex >= 0 ? rankBest.filter((p, i) => i <= bestOverallIndex && pilotosLista.some(d => identityKey(d) === identityKey(p))).length : null },
+            race: { bestLap: pace.bestLapValid ?? null, bestLapRankOverall: bestOverallIndex >= 0 ? bestOverallIndex + 1 : null },
             leadership: { lapsLedOverall: lapsLedOverall.get(id) || 0, lapsLedChampionship: lapsLedChampionship.get(id) || 0, relevantLapsOverall: analytics.snapshots?.length || 0 },
             achievements: { pole, win, podium: resultPosition <= 3, fastestLap: fastest, hatTrick: pole && win && fastest, grandChelem: pole && win && fastest && (lapsLedOverall.get(id) || 0) === (analytics.snapshots?.length || 0) && !!analytics.snapshots?.length }
         });
