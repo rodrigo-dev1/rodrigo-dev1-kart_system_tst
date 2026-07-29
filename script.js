@@ -6452,9 +6452,6 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         dataCorrida,
         resultadoDocId,
         stageKey,
-        dashboardResumo: resumo,
-        dashboardResumoVersao: DASHBOARD_RESUMO_VERSION,
-        dashboardResumoAtualizadoEmISO: resumo.atualizadoEmISO,
         normalizationVersion: NORMALIZATION_VERSION,
         analyticsVersion: KartAnalytics.VERSION,
         processedAtISO: new Date().toISOString(),
@@ -6478,7 +6475,24 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
 
     await persistirEstruturaNormalizadaEtapa(resultadoDocRef, corrida, classificacao, voltasCanonicas);
 
-    await persistirAnalyticsEtapa(resultadoDocRef, voltasCanonicas, pilotosCampeonato, voltaInfo.fonte, stat, { ...meta, stageKey, classificationAll: classificacaoResolvida.rows });
+    const persistedAnalytics = await persistirAnalyticsEtapa(resultadoDocRef, voltasCanonicas, pilotosCampeonato, voltaInfo.fonte, stat, { ...meta, stageKey, classificationAll: classificacaoResolvida.rows });
+    // O resumo exibido pela etapa é gravado somente depois de start analytics e
+    // Stage Highlights. As demais métricas permanecem exatamente como foram
+    // calculadas por dashboardEstatisticasEtapa.
+    if (persistedAnalytics?.stageHighlights) {
+        const winner = persistedAnalytics.stageHighlights.start;
+        resumo.metricas.melhorLargada = winner ? {
+            piloto: dashboardPilotoMetricaPersistivel(winner),
+            ganho: winner.start.deltaOverall,
+            grid: winner.start.gridPositionOverall,
+            posVolta1: winner.start.firstLapPositionOverall
+        } : null;
+    }
+    await resultadoDocRef.set(toFirestoreSafe({
+        dashboardResumo: resumo,
+        dashboardResumoVersao: DASHBOARD_RESUMO_VERSION,
+        dashboardResumoAtualizadoEmISO: new Date().toISOString()
+    }), { merge: true });
 
     if (atualizarGeral) await recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonato);
     limparCacheDashboardCampeonato(campeonatoDocId);
@@ -6493,7 +6507,7 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
     const ultrapassagensCamp = byId(analytics.ultrapassagensCampeonato);
     const ultrapassagensGeral = byId(analytics.ultrapassagensGeral);
     const firstLapChanges = byId(analytics.firstLapChanges);
-    const primeiro = analytics.snapshots?.[0]?.positions || [];
+    const primeiro = analytics.firstLapSnapshot?.positions || [];
     const primeiroCamp = KartAnalytics.filtrarSnapshot({ positions: primeiro }, new Set(pilotosLista.map(identityKey)), "campeonato");
     const rankBest = [...(analytics.regularidade || [])].filter(p => Number.isFinite(Number(p.bestLapValid))).sort((a, b) => Number(a.bestLapValid) - Number(b.bestLapValid));
     const agora = new Date().toISOString();
@@ -6509,6 +6523,10 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
         const id = identityKey(driver), result = resultados.get(id) || {}, quali = classificacao.get(id) || {};
         const pace = regularidade.get(id) || {}, overCamp = ultrapassagensCamp.get(id) || {}, overAll = ultrapassagensGeral.get(id) || {}, firstLap = firstLapChanges.get(id) || {};
         const firstOverallIndex = primeiro.findIndex(p => identityKey(p) === id), firstCampIndex = primeiroCamp.findIndex(p => identityKey(p) === id);
+        const start = analytics.startAnalytics?.get(id) || {
+            gridPositionOverall: null, firstLapPositionOverall: null, deltaOverall: null,
+            gridPositionChampionship: null, firstLapPositionChampionship: null, deltaChampionship: null
+        };
         const resultPosition = officialIndex + 1;
         const resultOverall = Number(result.posicao_geral_arquivo || result.posicao_final || 0) || null;
         const qualifyingOverall = Number(quali.posicao_geral_arquivo || quali.posicao_final || quali.posicao || 0) || null;
@@ -6532,7 +6550,7 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
             qualifying: { positionOverall: qualifyingOverall, positionChampionship: qualifyingPosition },
             finish: { deltaOverall: qualifyingOverall && resultOverall ? qualifyingOverall - resultOverall : null, deltaChampionship: qualifyingPosition && resultPosition ? qualifyingPosition - resultPosition : null },
             scoring: { total: Number(result.pontos || 0) + Number(result.melhor_tempo_ponto || 0) },
-            start: { gridPositionOverall: gridOverall, firstLapPositionOverall: firstOverall, deltaOverall: gridOverall && firstOverall ? gridOverall - firstOverall : null, gridPositionChampionship: qualifyingPosition, firstLapPositionChampionship: firstChampionship, deltaChampionship: qualifyingPosition && firstChampionship ? qualifyingPosition - firstChampionship : null },
+            start,
             firstLapOvertakes: { madeOverall: Number(firstLap.madeOverall || 0), takenOverall: Number(firstLap.takenOverall || 0), balanceOverall: Number(firstLap.balanceOverall || 0) },
             pace: { bestLap: pace.bestLapValid ?? null, pace: pace.pace ?? null, regularity: pace.regularidade ?? null, cleanLaps: Number(pace.cleanLapsCount || 0), totalLaps: Number(pace.totalLaps || 0), status: pace.status || "voltas_insuficientes" },
             overtakes: { madeOverall: Number(overAll.feitas || 0), takenOverall: Number(overAll.tomadas || 0), balanceOverall: Number(overAll.saldo || 0), madeChampionship: Number(overCamp.feitas || 0), takenChampionship: Number(overCamp.tomadas || 0), balanceChampionship: Number(overCamp.saldo || 0) },
@@ -6558,6 +6576,21 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     const normalizedAnalytics = pilotAnalytics.map(KartAnalytics.normalizePilotAnalyticsForHighlights);
     const officialAnalytics = KartAnalytics.getOfficialHighlightCandidates({ analytics: normalizedAnalytics, officialPilotUids });
     const analyticsUids = new Set(normalizedAnalytics.map(p => p.pilot_uid).filter(Boolean));
+    const expectedBestStart = Math.max(...officialAnalytics.map(p => p.start?.deltaOverall).filter(Number.isFinite).filter(value => value > 0), -Infinity);
+    if (Number.isFinite(expectedBestStart) && !stageHighlights.start) {
+        console.error("[Kart/BestStart] Destaque inconsistente", { etapa: meta?.etapa, expectedBestStart, analytics: officialAnalytics });
+        throw new Error(`[Kart/BestStart] etapa ${meta?.etapa || "-"} possui ganho oficial sem destaque`);
+    }
+    const bestStart = stageHighlights.start ? {
+        pilot_uid: stageHighlights.start.pilot_uid,
+        driver_name_display: stageHighlights.start.driver_name_display,
+        value: stageHighlights.start.start.deltaOverall,
+        etapa: Number(meta?.etapa || 0),
+        gridPositionOverall: stageHighlights.start.start.gridPositionOverall,
+        firstLapPositionOverall: stageHighlights.start.start.firstLapPositionOverall,
+        metric: "start.deltaOverall"
+    } : null;
+    const persistedStageHighlights = { ...stageHighlights, bestStart };
     console.group(`[Kart/Highlights Diagnostic] Etapa ${meta?.etapa || "-"}`);
     console.log("officialPilotUids", [...officialPilotUids]);
     console.log({
@@ -6598,6 +6631,19 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         "Qualifying Overall": p.qualifying?.positionOverall ?? null,
         "Qualifying Championship": p.qualifying?.positionChampionship ?? null
     })));
+    officialAnalytics.forEach(p => {
+        if (Number(p.firstLapOvertakes?.madeOverall) > 0 && (p.start?.gridPositionOverall === null || p.start?.firstLapPositionOverall === null)) {
+            console.warn("[Kart/BestStart] ultrapassagem sem snapshot comparável", { pilot_uid: p.pilot_uid, start: p.start, firstLapOvertakes: p.firstLapOvertakes });
+        }
+        console.debug("[Kart/BestStart/Stage]", {
+            pilot_uid: p.pilot_uid, gridPositionOverall: p.start?.gridPositionOverall,
+            firstLapPositionOverall: p.start?.firstLapPositionOverall, deltaOverall: p.start?.deltaOverall,
+            gridPositionChampionship: p.start?.gridPositionChampionship,
+            firstLapPositionChampionship: p.start?.firstLapPositionChampionship,
+            deltaChampionship: p.start?.deltaChampionship, stageHighlightBestStart: bestStart
+        });
+    });
+    console.log("Winner:", bestStart);
     console.groupEnd();
     const [participantesAntigos, voltasAntigas, pilotosAnalyticsAntigos] = await Promise.all([
         resultadoDocRef.collection("participantes_etapa").get(),
@@ -6637,8 +6683,8 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     analyticsValidation.consistency = validation;
     validation.snapshots.forEach(snapshot => { if (snapshot.missing.length) console.warn("[Kart/Snapshot]", snapshot); });
     const ops = [...limpeza,
-        { tipo: "set", ref: analyticsRef, payload: toFirestoreSafe({ ...analytics, analyticsValidation, stageHighlights, available: true, fonte: fonte || {}, processedAt: new Date().toISOString() }) },
-        { tipo: "set", ref: resultadoDocRef, payload: toFirestoreSafe({ stageHighlights, officialPilotUids: [...officialPilotUids], analyticsVersion: KartAnalytics.VERSION }) }
+        { tipo: "set", ref: analyticsRef, payload: toFirestoreSafe({ ...analytics, startAnalytics: Object.fromEntries(analytics.startAnalytics || []), analyticsValidation, stageHighlights: persistedStageHighlights, available: true, fonte: fonte || {}, processedAt: new Date().toISOString() }) },
+        { tipo: "set", ref: resultadoDocRef, payload: toFirestoreSafe({ stageHighlights: persistedStageHighlights, officialPilotUids: [...officialPilotUids], analyticsVersion: KartAnalytics.VERSION }) }
     ];
     participantes.forEach((p, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("participantes_etapa").doc(FirestoreIntegrity.requireFirestoreId(id, "pilot_uid", { etapaId: meta?.resultadoDocId, collection: "participantes_etapa" })), payload: p }));
     const porPiloto = new Map();
@@ -6654,7 +6700,7 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     await executarBatchFirestore(ops);
     console.debug("[Kart/PilotAnalytics]", { campeonato: meta?.campeonato_id, etapa: meta?.resultadoDocId, officialCount: officialPilotUids.size, pilotAnalyticsCount: pilotAnalytics.length, pilotSummaryCount: officialPilotUids.size });
     if (officialPilotUids.size !== pilotAnalytics.length) console.warn("[Kart/PilotAnalytics] quantidade inconsistente", { officialCount: officialPilotUids.size, pilotAnalyticsCount: pilotAnalytics.length });
-    return analytics;
+    return { analytics, pilotAnalytics, stageHighlights: persistedStageHighlights };
 }
 
 async function persistirPilotSummariesCampeonato(campRef, campeonatoDocId) {
@@ -6766,6 +6812,14 @@ async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeona
     }
     const officialPilotUids = new Set(ranking.map(getPilotUid).filter(Boolean));
     const championshipHighlights = KartAnalytics.buildChampionshipHighlights(stageAnalytics, officialPilotUids);
+    if (championshipHighlights.start) console.debug("[Kart/BestStart/ChampionshipSource]", {
+        pilot_uid: championshipHighlights.start.pilot_uid,
+        nome: championshipHighlights.start.driver_name_display,
+        etapa: championshipHighlights.start._stage,
+        value: championshipHighlights.start.start.deltaOverall,
+        sourceDocument: `resultado_final/${championshipHighlights.start.etapa_id}/pilot_analytics/${championshipHighlights.start.pilot_uid}`,
+        sourceField: "start.deltaOverall"
+    });
     const allAnalytics = stageAnalytics.flatMap(stage => stage.analytics);
     const normalized = allAnalytics.map(KartAnalytics.normalizePilotAnalyticsForHighlights);
     const matched = KartAnalytics.getOfficialHighlightCandidates({ analytics: normalized, officialPilotUids });
