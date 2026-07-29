@@ -663,6 +663,7 @@ function montarBackupPayload({ campeonato, etapa, dataCorrida, cfg, file, conteu
         idImportacao: idUnico,
         campeonato,
         campeonato_id: normalizarDocId(campeonato),
+        stageKey: StageIntegrity.createStageKey(normalizarDocId(campeonato), etapa, dataCorrida),
         etapa: Number(etapa),
         dataCorrida,
         tipoArquivo: cfg.tipo,
@@ -2272,6 +2273,7 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
     const importId = backupId || `${dataCorrida}_${normalizarChave(campeonato)}_${cfg.tipo}_etapa_${etapa}_${Date.now()}`;
     const resultadoDocRef = campRef.collection("resultado_final").doc(resultadoDocId);
     const agoraISO = new Date().toISOString();
+    const stageKey = StageIntegrity.createStageKey(campeonatoDocId, etapa, dataCorrida);
 
     await resultadoDocRef.set(toFirestoreSafe({
         campeonato,
@@ -2279,6 +2281,7 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
         etapa: Number(etapa),
         dataCorrida,
         resultadoDocId,
+        stageKey,
         atualizadoEmISO: agoraISO,
         caminhoBackup: backupId ? `${COLLECTION_BACKUPS}/${backupId}` : "",
         caminhoFirestore: `${COLLECTION_CAMPEONATOS}/${campeonatoDocId}/resultado_final/${resultadoDocId}`
@@ -2307,6 +2310,7 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
             campeonato_id: campeonatoDocId,
             etapa: Number(etapa),
             dataCorrida,
+            stageKey,
             tipoArquivo: cfg.tipo,
             tipoLabel: cfg.label,
             idImportacao: importId,
@@ -2341,6 +2345,10 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
             tipoLabel: cfg.label,
             idImportacao: importId,
             nomeArquivo: nomeArquivo || "",
+            campeonato_id: campeonatoDocId,
+            etapa: Number(etapa),
+            dataCorrida,
+            stageKey,
             qtdSelecionados: selecionadosCanonicos.length,
             atualizadoEmISO: agoraISO,
             pilotosSelecionados: selecionadosCanonicos.map((p, idx) => ({
@@ -2757,7 +2765,7 @@ function recalcularPreviewImportacao(campeonato, exibirHint = false, calcularPon
         IMPORTACAO_PREVIA.forEach(item => {
             item.posicao_final2 = item.checked && !item.conflitoId ? rankPorItem.get(item) || 0 : 0;
             item.posCampeonato = item.posicao_final2;
-            item.pontos = item.posicao_final2 ? PONTOS_PADRAO[item.posicao_final2] || 0 : 0;
+            item.pontos = item.posicao_final2 ? StageIntegrity.getPointsForChampionshipPosition(PONTOS_PADRAO, item.posicao_final2) : 0;
             item.origemPontuacao = item.posicao_final2 ? "Pontuação padrão da importação" : "-";
         });
 
@@ -5265,7 +5273,6 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
     });
 
     const ultrapassagens = new Map();
-    const posAnterior = new Map();
     const lideradas = new Map();
     let melhorLargada = null;
 
@@ -5278,16 +5285,6 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
         }
 
         ordem.forEach(item => {
-            const anterior = posAnterior.get(item.key);
-            if (anterior && anterior > item.pos) {
-                const atual = ultrapassagens.get(item.key) || { piloto: item.piloto, total: 0 };
-                atual.total += anterior - item.pos;
-                ultrapassagens.set(item.key, atual);
-            } else if (!ultrapassagens.has(item.key)) {
-                ultrapassagens.set(item.key, { piloto: item.piloto, total: 0 });
-            }
-            posAnterior.set(item.key, item.pos);
-
             if (numeroVolta === 1) {
                 const posGrid = grid.get(item.key);
                 if (posGrid) {
@@ -5304,6 +5301,29 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
             }
         });
     });
+
+    // Fonte canônica das ultrapassagens: inversões relativas entre cada par de
+    // snapshots, começando uma única vez em Grid -> V1.
+    const gridOrder = dashboardOrdenarResultado(classificacao).map((piloto, index) => ({
+        ...piloto, positionOverall: index + 1
+    }));
+    const lapOrders = [...ordemPorVolta.values()].map(ordem => ordem.map(item => ({
+        ...item.piloto, positionOverall: item.pos
+    })));
+    const transitionOrders = gridOrder.length ? [gridOrder, ...lapOrders] : lapOrders;
+    transitionOrders.flat().forEach(piloto => {
+        const pilotKey = dashboardPilotoKey(piloto);
+        if (pilotKey && !ultrapassagens.has(pilotKey)) ultrapassagens.set(pilotKey, { piloto, total: 0, tomadas: 0 });
+    });
+    for (let index = 1; index < transitionOrders.length; index += 1) {
+        KartAnalytics.calculatePositionChangesBetweenSnapshots(transitionOrders[index - 1], transitionOrders[index]).forEach(change => {
+            const pilotKey = dashboardPilotoKey(change);
+            const atual = ultrapassagens.get(pilotKey) || { piloto: change, total: 0, tomadas: 0 };
+            atual.total += Number(change.madeOverall || 0);
+            atual.tomadas += Number(change.takenOverall || 0);
+            ultrapassagens.set(pilotKey, atual);
+        });
+    }
 
     const official = values => [...values].filter(v => officialPilotUids.has(getPilotUid(v.piloto)));
     const topUltrapassagens = official(ultrapassagens.values()).sort((a, b) => b.total - a.total || dashboardNomePiloto(a.piloto).localeCompare(dashboardNomePiloto(b.piloto)))[0] || null;
@@ -6342,17 +6362,28 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         resultadoDocId
     };
     const pilotosCadastrados = await buscarPilotosDoCampeonatoRankingFirestore(campeonato);
-    const corridaCollection = corridaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
-    const classificacaoCollection = classificacaoSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
+    const latestResultId = String(meta.resultadoFinalResumo?.idImportacao || "");
+    const latestQualifyingId = String(meta.classificacaoResumo?.idImportacao || "");
+    const somenteImportacao = (docs, importId) => docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
+        .filter(row => !importId || String(row.idImportacao || "") === importId);
+    const corridaCollection = somenteImportacao(corridaSnap.docs, latestResultId);
+    const classificacaoCollection = somenteImportacao(classificacaoSnap.docs, latestQualifyingId);
     // Usa literalmente a origem que hidrata "Resultado da Etapa". Analytics
     // antigos podem ter apenas parte dos oficiais na subcollection, enquanto
     // dashboardResumo.corrida preserva o resultado completo exibido (11 x 6).
     const registry = await carregarIdentidadesPilotos();
     const corridaFallback = corridaCollection.length ? corridaCollection : (meta.resultadoFinalResumo?.pilotosSelecionados || []);
     const classificacaoFallback = classificacaoCollection.length ? classificacaoCollection : (meta.classificacaoResumo?.pilotosSelecionados || []);
-    const corridaRaw = DriverIdentity.getStageReferenceRows(meta, corridaFallback, classificacaoFallback);
+    // A importação ativa da própria etapa é canônica; dashboardResumo é apenas
+    // fallback legado e nunca pode substituir um Resultado Final mais novo.
+    const corridaRaw = corridaFallback.length ? corridaFallback : DriverIdentity.getStageReferenceRows(meta, [], classificacaoFallback);
     const corridaResolvida = await resolverPersistirIdentidades(corridaRaw, registry, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "resultado_final" });
-    const corrida = corridaResolvida.rows;
+    const officialFromResult = DriverIdentity.getOfficialStageDriverIds(corridaResolvida.rows, pilotosCadastrados.pilotos);
+    const corridaOrdenada = StageIntegrity.buildChampionshipResult(corridaResolvida.rows, officialFromResult.uids);
+    const corrida = StageIntegrity.applyChampionshipScoring(corridaOrdenada, PONTOS_PADRAO).map(row => ({
+        ...row, posicao_geral_arquivo: row.positionOverall
+    }));
+    StageIntegrity.validateScoringBeforePersist(corrida, PONTOS_PADRAO);
     const classificacaoResolvida = await resolverPersistirIdentidades(classificacaoFallback, corridaResolvida.identities, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "classificacao" });
     const oficiaisEtapa = DriverIdentity.getOfficialStageDriverIds(corrida, pilotosCadastrados.pilotos);
     const pilotosCampeonato = {
@@ -6368,6 +6399,17 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         if (!classificacaoUids.has(pilotUid)) console.warn("[Kart] piloto oficial ausente na classificação", { campeonatoId: campeonatoDocId, etapaId: resultadoDocId, pilot_uid: pilotUid });
     });
     const voltaInfo = await dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVoltaAtual, nomeArquivoVoltaAtual, idImportacaoVoltaAtual);
+    const sourceMeta = (summary, fallback = {}) => summary?.idImportacao ? summary : fallback;
+    const sources = {
+        resultadoFinal: sourceMeta(meta.resultadoFinalResumo),
+        classificacao: sourceMeta(meta.classificacaoResumo),
+        voltaAVolta: voltaInfo.fonte?.idImportacao ? voltaInfo.fonte : null
+    };
+    Object.values(sources).filter(Boolean).forEach(source => Object.assign(source, {
+        campeonato_id: source.campeonato_id || campeonatoDocId,
+        etapa: source.etapa || Number(etapa), dataCorrida: source.dataCorrida || dataCorrida
+    }));
+    const stageKey = StageIntegrity.validateStageSources({ campeonatoId: campeonatoDocId, etapa, dataCorrida }, sources);
     const vinculosVolta = vinculosVoltaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
     const voltasPreCanonicas = dashboardCanonicalizarVoltasEtapa(
         voltaInfo.voltas || [],
@@ -6394,6 +6436,7 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         etapa: Number(etapa),
         dataCorrida,
         resultadoDocId,
+        stageKey,
         dashboardResumo: resumo,
         dashboardResumoVersao: DASHBOARD_RESUMO_VERSION,
         dashboardResumoAtualizadoEmISO: resumo.atualizadoEmISO,
@@ -6420,7 +6463,7 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
 
     await persistirEstruturaNormalizadaEtapa(resultadoDocRef, corrida, classificacao, voltasCanonicas);
 
-    await persistirAnalyticsEtapa(resultadoDocRef, voltasCanonicas, pilotosCampeonato, voltaInfo.fonte, stat, meta);
+    await persistirAnalyticsEtapa(resultadoDocRef, voltasCanonicas, pilotosCampeonato, voltaInfo.fonte, stat, { ...meta, stageKey, classificationAll: classificacaoResolvida.rows });
 
     if (atualizarGeral) await recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonato);
     limparCacheDashboardCampeonato(campeonatoDocId);
@@ -6434,6 +6477,7 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
     const regularidade = byId(analytics.regularidade);
     const ultrapassagensCamp = byId(analytics.ultrapassagensCampeonato);
     const ultrapassagensGeral = byId(analytics.ultrapassagensGeral);
+    const firstLapChanges = byId(analytics.firstLapChanges);
     const primeiro = analytics.snapshots?.[0]?.positions || [];
     const primeiroCamp = KartAnalytics.filtrarSnapshot({ positions: primeiro }, new Set(pilotosLista.map(identityKey)), "campeonato");
     const rankBest = [...(analytics.regularidade || [])].filter(p => Number.isFinite(Number(p.bestLapValid))).sort((a, b) => Number(a.bestLapValid) - Number(b.bestLapValid));
@@ -6448,7 +6492,7 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
     });
     return pilotosLista.map((driver, officialIndex) => {
         const id = identityKey(driver), result = resultados.get(id) || {}, quali = classificacao.get(id) || {};
-        const pace = regularidade.get(id) || {}, overCamp = ultrapassagensCamp.get(id) || {}, overAll = ultrapassagensGeral.get(id) || {};
+        const pace = regularidade.get(id) || {}, overCamp = ultrapassagensCamp.get(id) || {}, overAll = ultrapassagensGeral.get(id) || {}, firstLap = firstLapChanges.get(id) || {};
         const firstOverallIndex = primeiro.findIndex(p => identityKey(p) === id), firstCampIndex = primeiroCamp.findIndex(p => identityKey(p) === id);
         const resultPosition = officialIndex + 1;
         const resultOverall = Number(result.posicao_geral_arquivo || result.posicao_final || 0) || null;
@@ -6474,6 +6518,7 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
             finish: { deltaOverall: qualifyingOverall && resultOverall ? qualifyingOverall - resultOverall : null, deltaChampionship: qualifyingPosition && resultPosition ? qualifyingPosition - resultPosition : null },
             scoring: { total: Number(result.pontos || 0) + Number(result.melhor_tempo_ponto || 0) },
             start: { gridPositionOverall: gridOverall, firstLapPositionOverall: firstOverall, deltaOverall: gridOverall && firstOverall ? gridOverall - firstOverall : null, gridPositionChampionship: qualifyingPosition, firstLapPositionChampionship: firstChampionship, deltaChampionship: qualifyingPosition && firstChampionship ? qualifyingPosition - firstChampionship : null },
+            firstLapOvertakes: { madeOverall: Number(firstLap.madeOverall || 0), takenOverall: Number(firstLap.takenOverall || 0), balanceOverall: Number(firstLap.balanceOverall || 0) },
             pace: { bestLap: pace.bestLapValid ?? null, pace: pace.pace ?? null, regularity: pace.regularidade ?? null, cleanLaps: Number(pace.cleanLapsCount || 0), totalLaps: Number(pace.totalLaps || 0), status: pace.status || "voltas_insuficientes" },
             overtakes: { madeOverall: Number(overAll.feitas || 0), takenOverall: Number(overAll.tomadas || 0), balanceOverall: Number(overAll.saldo || 0), madeChampionship: Number(overCamp.feitas || 0), takenChampionship: Number(overCamp.tomadas || 0), balanceChampionship: Number(overCamp.saldo || 0) },
             bestLap: { time: pace.bestLapValid ?? null, rankOverall: bestOverallIndex >= 0 ? bestOverallIndex + 1 : null, rankChampionship: bestOverallIndex >= 0 ? rankBest.filter((p, i) => i <= bestOverallIndex && pilotosLista.some(d => identityKey(d) === identityKey(p))).length : null },
@@ -6489,7 +6534,7 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
     pilotosLista.forEach(driver => FirestoreIntegrity.requireFirestoreId(getPilotUid(driver), "pilot_uid", { campeonatoId: meta?.campeonato_id, etapaId: meta?.resultadoDocId, driver: DriverIdentity.getDriverName(driver) }));
     // Todo o cálculo e a validação acontecem antes de qualquer exclusão.
-    const analytics = KartAnalytics.processarVoltasEtapa(voltas || [], pilotosLista, stat?.classificacao || []);
+    const analytics = KartAnalytics.processarVoltasEtapa(voltas || [], pilotosLista, meta?.classificationAll || stat?.classificacao || []);
     const pilotAnalytics = montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta);
     const officialPilotUids = new Set(pilotosLista.map(getPilotUid).filter(Boolean));
     const stageHighlights = KartAnalytics.buildStageHighlights(pilotAnalytics, officialPilotUids);

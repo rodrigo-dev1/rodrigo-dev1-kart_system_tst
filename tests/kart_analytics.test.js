@@ -2,6 +2,16 @@ const assert = require("node:assert/strict");
 global.DriverIdentity = require("../driver_identity.js");
 const analytics = require("../kart_analytics.js");
 
+{
+    const order = ids => ids.map((pilot_uid, index) => ({ pilot_uid, driver_name: pilot_uid, positionOverall: index + 1, isChampionship: !pilot_uid.startsWith("X") }));
+    let changes = analytics.calculatePositionChangesBetweenSnapshots(order(["A", "R", "B", "C"]), order(["B", "R", "A", "C"]));
+    const mixed = changes.find(x => x.pilot_uid === "R");
+    assert.deepEqual({ madeOverall: mixed.madeOverall, takenOverall: mixed.takenOverall, balanceOverall: mixed.balanceOverall }, { madeOverall: 1, takenOverall: 1, balanceOverall: 0 });
+    changes = analytics.calculatePositionChangesBetweenSnapshots(order(["X1", "X2", "R", "L"]), order(["R", "X1", "X2", "L"]));
+    const rodrigo = changes.find(x => x.pilot_uid === "R");
+    assert.deepEqual({ madeOverall: rodrigo.madeOverall, takenOverall: rodrigo.takenOverall, balanceOverall: rodrigo.balanceOverall }, { madeOverall: 2, takenOverall: 0, balanceOverall: 2 });
+}
+
 const official = new Set(["A", "B", "C"]);
 const pilot = (uid, values) => ({ pilot_uid: uid, ...values });
 const rows = [

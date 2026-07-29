@@ -4,7 +4,7 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 8;
+    const VERSION = 9;
     const num = value => {
         const n = Number(value);
         return Number.isFinite(n) ? n : null;
@@ -165,17 +165,51 @@
             const id = identity.getPilotUid(p) || identity.getDriverId(p) || key(p);
             if (id) result.set(id, { ...(identity.getPilotUid(p) ? { pilot_uid: identity.getPilotUid(p) } : {}), driver_id: identity.getDriverId(p) || null, driver_name: identity.getDriverName(p), isChampionship: p.isChampionship === true, feitas: 0, tomadas: 0, saldo: 0 });
         });
-        (snapshots || []).forEach((snapshot, snapshotIndex) => {
-            snapshot.positions.filter(p => !championshipOnly || p.isChampionship).forEach(p => {
-                const resultKey = identity.getPilotUid(p) || identity.getDriverId(p) || key(p);
-                if (!result.has(resultKey)) result.set(resultKey, { ...(identity.getPilotUid(p) ? { pilot_uid: identity.getPilotUid(p) } : {}), driver_id: identity.getDriverId(p) || null, driver_name: p.driver_name, isChampionship: p.isChampionship === true, feitas: 0, tomadas: 0, saldo: 0 });
-                if (!snapshotIndex) return; // primeira classificação é somente a referência da largada
-                const delta = championshipOnly ? p.positionDeltaChampionship : p.positionDeltaOverall;
-                if (delta > 0) result.get(resultKey).feitas += delta;
-                if (delta < 0) result.get(resultKey).tomadas += Math.abs(delta);
-            });
+        (snapshots || []).flatMap(snapshot => snapshot.positions || []).filter(p => !championshipOnly || p.isChampionship).forEach(p => {
+            const id = identity.getPilotUid(p) || identity.getDriverId(p) || key(p);
+            if (id && !result.has(id)) result.set(id, { ...(identity.getPilotUid(p) ? { pilot_uid: identity.getPilotUid(p) } : {}), driver_id: identity.getDriverId(p) || null, driver_name: identity.getDriverName(p), isChampionship: p.isChampionship === true, feitas: 0, tomadas: 0, saldo: 0 });
         });
+        for (let index = 1; index < (snapshots || []).length; index += 1) {
+            const changes = calculatePositionChangesBetweenSnapshots(snapshots[index - 1].positions, snapshots[index].positions, championshipOnly);
+            changes.forEach(change => {
+                const resultKey = identity.getPilotUid(change) || identity.getDriverId(change) || key(change);
+                if (!result.has(resultKey)) result.set(resultKey, { ...change, feitas: 0, tomadas: 0, saldo: 0 });
+                let made = change.madeOverall, taken = change.takenOverall;
+                // Snapshots legados/incompletos podem não conter os pares que
+                // explicam o delta. Neles preservamos o saldo já consolidado.
+                const delta = championshipOnly ? Number(change.positionDeltaChampionship) : Number(change.positionDeltaOverall);
+                if (!made && !taken && Number.isFinite(delta) && delta !== 0) {
+                    made = Math.max(0, delta); taken = Math.max(0, -delta);
+                }
+                result.get(resultKey).feitas += made;
+                result.get(resultKey).tomadas += taken;
+            });
+        }
         return [...result.values()].map(i => ({ ...i, saldo: i.feitas - i.tomadas }));
+    }
+    function calculatePositionChangesBetweenSnapshots(previousOrder, currentOrder, championshipOnly = false) {
+        const filter = rows => (rows || []).filter(row => !championshipOnly || row.isChampionship);
+        const previous = filter(previousOrder), current = filter(currentOrder);
+        const prevPos = new Map(previous.map((row, index) => [key(row), index]));
+        const currPos = new Map(current.map((row, index) => [key(row), index]));
+        return current.filter(row => prevPos.has(key(row))).map(row => {
+            let madeOverall = 0, takenOverall = 0;
+            previous.forEach(other => {
+                if (key(other) === key(row) || !currPos.has(key(other))) return;
+                const wasAhead = prevPos.get(key(row)) < prevPos.get(key(other));
+                const isAhead = currPos.get(key(row)) < currPos.get(key(other));
+                if (!wasAhead && isAhead) madeOverall += 1;
+                if (wasAhead && !isAhead) takenOverall += 1;
+            });
+            return { ...row, madeOverall, takenOverall, balanceOverall: madeOverall - takenOverall };
+        });
+    }
+    function gridSnapshot(gridRows, participants, officialIds) {
+        const known = new Map((participants || []).map(row => [key(row), row]));
+        return (gridRows || []).map((row, index) => {
+            const merged = { ...(known.get(key(row)) || {}), ...row };
+            return { ...merged, positionOverall: index + 1, isChampionship: officialIds.has(identity.getPilotUid(merged) || identity.getDriverId(merged)) };
+        });
     }
     function processarVoltasEtapa(voltas, officialDrivers = [], gridRows = []) {
         const officialRows = (officialDrivers || []).map(item => typeof item === "object" ? item : { driver_id: item });
@@ -187,7 +221,15 @@
         const regularityKeys = new Set(regularidade.items.map(key));
         participants.forEach((p, k) => { if (!regularityKeys.has(k)) regularidade.items.push({ pilot_uid: identity.getPilotUid(p), driver_id: identity.getDriverId(p) || null, driver_name: identity.getDriverName(p), kart_numero: p.kart_numero || "", isChampionship: p.isChampionship, regularidade: null, pace: null, bestLap: null, bestLapValid: null, cleanLaps: 0, cleanLapsCount: 0, totalLaps: 0, cleanLapNumbers: [], excludedLapNumbers: [], laps: [], status: "voltas_insuficientes" }); });
         const snapshots = gerarSnapshots(voltas, officialRows, gridRows);
-        return { analyticsVersion: VERSION, participants: [...participants.values()], regularidade: regularidade.items, gridPace: regularidade.gridPace, snapshots, ultrapassagensCampeonato: calcularUltrapassagens(snapshots, true, [...participants.values()]), ultrapassagensGeral: calcularUltrapassagens(snapshots, false, [...participants.values()]) };
+        const grid = gridSnapshot(gridRows, [...participants.values()], new Set(idsCampeonato));
+        const transitions = grid.length ? [{ lap: 0, positions: grid, drivers: grid }, ...snapshots] : snapshots;
+        const firstLapChanges = transitions.length > 1 ? calculatePositionChangesBetweenSnapshots(transitions[0].positions, transitions[1].positions, false) : [];
+        firstLapChanges.forEach(change => {
+            const gridPosition = grid.findIndex(row => key(row) === key(change)) + 1;
+            const firstLapPosition = snapshots[0]?.positions?.findIndex(row => key(row) === key(change)) + 1;
+            if (grid.length === snapshots[0]?.positions?.length && change.balanceOverall !== gridPosition - firstLapPosition) console.warn("[Kart/FirstLap] inconsistência", { pilot_uid: identity.getPilotUid(change), gridPosition, firstLapPosition, ...change });
+        });
+        return { analyticsVersion: VERSION, participants: [...participants.values()], regularidade: regularidade.items, gridPace: regularidade.gridPace, snapshots, firstLapChanges, ultrapassagensCampeonato: calcularUltrapassagens(transitions, true, [...participants.values()]), ultrapassagensGeral: calcularUltrapassagens(transitions, false, [...participants.values()]) };
     }
     function consolidarPilotAnalytics(rows, { campeonatoId = "", etapaId = "all" } = {}) {
         const stages = (rows || []).filter(row => (!campeonatoId || row.campeonato_id === campeonatoId) && (!etapaId || etapaId === "all" || row.etapa_id === etapaId));
@@ -203,5 +245,5 @@
             }
         };
     }
-    return { VERSION, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, processarVoltasEtapa, consolidarPilotAnalytics, getOfficialMetricCandidates, buildStageHighlights, championshipSnapshotRows };
+    return { VERSION, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, calculatePositionChangesBetweenSnapshots, processarVoltasEtapa, consolidarPilotAnalytics, getOfficialMetricCandidates, buildStageHighlights, championshipSnapshotRows };
 }));
