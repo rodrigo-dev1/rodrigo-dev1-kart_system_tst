@@ -5671,8 +5671,8 @@ function dashboardCardsEtapa(stat) {
         dashboardCard({
             titulo: "🚀 + Ultrapassagens",
             piloto: m.topUltrapassagens?.piloto,
-            valor: m.topUltrapassagens ? `${m.topUltrapassagens.total} posições` : "-",
-            descricao: "Maior soma de posições ganhas volta a volta",
+            valor: m.topUltrapassagens ? `${m.topUltrapassagens.total} ${m.topUltrapassagens.total === 1 ? "ultrapassagem" : "ultrapassagens"}` : "-",
+            descricao: "Maior total de ultrapassagens feitas na etapa",
             vazio: !m.topUltrapassagens,
             indisponivel: !m.topUltrapassagens && !stat.completo?.volta_a_volta
         }),
@@ -6480,6 +6480,16 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
     // Stage Highlights. As demais métricas permanecem exatamente como foram
     // calculadas por dashboardEstatisticasEtapa.
     if (persistedAnalytics?.stageHighlights) {
+        const overtakeRows = (persistedAnalytics.pilotAnalytics || []).map(item => ({
+            piloto: dashboardPilotoMetricaPersistivel(item),
+            total: Number(item.overtakes?.madeOverall || 0)
+        }));
+        const overtakeWinner = persistedAnalytics.stageHighlights.overtakes;
+        resumo.metricas.ultrapassagens = overtakeRows;
+        resumo.metricas.topUltrapassagens = overtakeWinner ? {
+            piloto: dashboardPilotoMetricaPersistivel(overtakeWinner),
+            total: Number(overtakeWinner.overtakes?.madeOverall || 0)
+        } : null;
         const winner = persistedAnalytics.stageHighlights.start;
         resumo.metricas.melhorLargada = winner ? {
             piloto: dashboardPilotoMetricaPersistivel(winner),
@@ -6595,6 +6605,18 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     const overtakeInvariant = KartAnalytics.assertOvertakeInvariant(analytics.ultrapassagensGeral, `etapa ${meta?.etapa || meta?.resultadoDocId || "-"}`);
     const firstLapInvariant = KartAnalytics.assertOvertakeInvariant(analytics.firstLapChanges, `primeira volta da etapa ${meta?.etapa || meta?.resultadoDocId || "-"}`);
     const pilotAnalytics = montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta);
+    pilotAnalytics.forEach(p => {
+        const canonical = analytics.raceOvertakes?.get(p.pilot_uid);
+        console.group("[Kart/Overtakes/Pilot]");
+        console.log({
+            name: p.driver_name_display, pilot_uid: p.pilot_uid,
+            start: { grid: p.start?.gridPositionOverall, lap1: p.start?.firstLapPositionOverall, delta: p.start?.deltaOverall },
+            firstLap: { made: p.firstLapOvertakes?.madeOverall, taken: p.firstLapOvertakes?.takenOverall, balance: p.firstLapOvertakes?.balanceOverall },
+            race: { made: p.overtakes?.madeOverall, taken: p.overtakes?.takenOverall, balance: p.overtakes?.balanceOverall }
+        });
+        console.table(canonical?.transitionBreakdown || []);
+        console.groupEnd();
+    });
     const gridDiagnostic = new Map((analytics.gridSnapshot?.positions || []).map(row => [getPilotUid(row), row]));
     const lap1Diagnostic = new Map((analytics.firstLapSnapshot?.positions || []).map(row => [getPilotUid(row), row]));
     console.table(pilotAnalytics.map(p => ({
