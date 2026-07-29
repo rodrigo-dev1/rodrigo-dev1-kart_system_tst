@@ -149,7 +149,7 @@ test("filtro central prioriza driver_id e usa nome apenas quando o ID esta ausen
         { driver_id: "888", driver_name: "EXTERNO" }
     ];
     const filtrados = identity.filterStageChampionshipDrivers(rows, oficiais);
-    assert.deepEqual(filtrados.map(row => identity.getDriverId(row) || identity.normalizeDriverName(identity.getDriverName(row))), ["41938", "RODRIGO CRUZ"]);
+    assert.deepEqual(filtrados.map(row => identity.getDriverId(row) || identity.normalizeDriverName(identity.getDriverName(row))), ["41938", "rodrigo cruz"]);
 });
 
 test("reconciliacao mantem exatamente todos os pilotos do resultado", () => {
@@ -201,4 +201,41 @@ test("dashboard do piloto consolida campeonato e filtra etapa especifica", () =>
     const stage = analytics.consolidarPilotAnalytics(rows, { campeonatoId: "camp-a", etapaId: "e2" });
     assert.equal(stage.stages.length, 1);
     assert.equal(stage.kpis.points, 15);
+});
+
+test("pilot_uid independe de kart e RENTAL", () => {
+    const names = ["041 - BRENO MANTOVANI - RENTAL", "029 - Breno Mantovani - Rental", "055 - BRENO MANTOVANI"];
+    const uids = names.map(driver_name => identity.resolvePilotIdentity({ driver_name }, []).identity.pilot_uid);
+    assert.equal(new Set(uids).size, 1);
+    assert.equal(identity.normalizeDriverName("041 - [99999] BRENO MANTOVANI - RENTAL"), "breno mantovani");
+});
+
+test("driver_id futuro enriquece a identidade sem alterar pilot_uid", () => {
+    const first = identity.resolvePilotIdentity({ driver_name: "041 - BRENO MANTOVANI - RENTAL" }, []);
+    const later = identity.resolvePilotIdentity({ driver_id: "98765", driver_name: "[98765] BRENO MANTOVANI" }, [first.identity]);
+    assert.equal(later.identity.pilot_uid, first.identity.pilot_uid);
+    assert.equal(later.identity.driver_id, "98765");
+    assert.deepEqual(later.identity.external_ids, ["98765"]);
+});
+
+test("mesmo driver_id converge resultado classificacao e volta a volta", () => {
+    let registry = [];
+    const uids = ["resultado", "classificacao", "volta"].map(source => {
+        const resolved = identity.resolvePilotIdentity({ driver_id: "231138", driver_name: source === "volta" ? "050 - [231138] RODRIGO CRUZ - RENTAL" : "RODRIGO CRUZ" }, registry);
+        registry = [resolved.identity];
+        return resolved.identity.pilot_uid;
+    });
+    assert.equal(new Set(uids).size, 1);
+});
+
+test("nome ambiguo gera warning e nao faz merge automatico", () => {
+    const identities = [
+        { pilot_uid: "p_one", normalized_name: "joao silva", driver_name_display: "João Silva" },
+        { pilot_uid: "p_two", normalized_name: "joao silva", driver_name_display: "João Silva" }
+    ];
+    const warnings = [];
+    const resolved = identity.resolvePilotIdentity({ driver_name: "JOAO SILVA" }, identities, { disambiguator: "stage:row", onWarning: warning => warnings.push(warning) });
+    assert.equal(warnings[0].message, "Identidade ambígua");
+    assert.notEqual(resolved.identity.pilot_uid, "p_one");
+    assert.notEqual(resolved.identity.pilot_uid, "p_two");
 });

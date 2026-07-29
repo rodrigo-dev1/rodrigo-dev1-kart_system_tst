@@ -14,6 +14,8 @@ const firestore = firebase.firestore();
 const COLLECTION_CAMPEONATOS = "campeonato";
 const COLLECTION_PILOTOS = "Pilotos";
 const COLLECTION_BACKUPS = "backups_importacao";
+const COLLECTION_PILOT_IDENTITIES = "pilot_identities";
+const NORMALIZATION_VERSION = 2;
 
 const SENHA_ADMIN = "123456";
 
@@ -269,6 +271,56 @@ function normalizarDriverId(driverId) {
 
 function getDriverId(item) {
     return DriverIdentity.getDriverId(item);
+}
+
+function getPilotUid(item) {
+    return DriverIdentity.getPilotUid(item);
+}
+
+async function carregarIdentidadesPilotos() {
+    const snapshot = await firestore.collection(COLLECTION_PILOT_IDENTITIES).get();
+    const identities = snapshot.docs.map(doc => ({ pilot_uid: doc.id, ...(doc.data() || {}) }));
+    // Cadastro global legado participa da resolução, mas nunca substitui uma
+    // identidade central já aprendida.
+    DB.pilotos.forEach(pilot => {
+        if (getPilotUid(pilot) && !identities.some(item => getPilotUid(item) === getPilotUid(pilot))) identities.push(pilot);
+    });
+    return identities;
+}
+
+async function resolverPersistirIdentidades(rows, identities = null, context = {}) {
+    const registry = identities || await carregarIdentidadesPilotos();
+    const normalized = [], changed = new Map(), warnings = [];
+    (rows || []).forEach((row, index) => {
+        const resolved = DriverIdentity.resolvePilotIdentity(row, registry, {
+            disambiguator: `${context.campeonato_id || "global"}:${context.etapa_id || "stage"}:${index}`,
+            onWarning: warning => warnings.push({ ...warning, index })
+        });
+        const current = registry.findIndex(item => getPilotUid(item) === resolved.identity.pilot_uid);
+        if (current >= 0) registry[current] = resolved.identity; else registry.push(resolved.identity);
+        changed.set(resolved.identity.pilot_uid, resolved.identity);
+        normalized.push({ ...resolved.pilot, normalizationVersion: NORMALIZATION_VERSION });
+    });
+    const batch = firestore.batch();
+    changed.forEach((identity, pilotUid) => batch.set(
+        firestore.collection(COLLECTION_PILOT_IDENTITIES).doc(FirestoreIntegrity.requireFirestoreId(pilotUid, "pilot_uid", context)),
+        toFirestoreSafe(identity), { merge: true }
+    ));
+    changed.forEach(identity => {
+        const matches = DB.pilotos.filter(pilot =>
+            (getDriverId(identity) && getDriverId(pilot) === getDriverId(identity)) ||
+            (identity.normalized_name && DriverIdentity.normalizeDriverName(DriverIdentity.getDriverName(pilot)) === identity.normalized_name)
+        );
+        if (matches.length === 1) batch.set(firestore.collection(COLLECTION_PILOTOS).doc(matches[0].id), {
+            pilot_uid: identity.pilot_uid,
+            driver_id: identity.driver_id || null,
+            id_piloto: identity.driver_id || null,
+            atualizadoEmISO: identity.updatedAtISO
+        }, { merge: true });
+    });
+    if (changed.size) await batch.commit();
+    warnings.forEach(warning => console.warn("[Kart/Identity] Identidade ambígua", { ...context, ...warning }));
+    return { rows: normalized, identities: registry, warnings };
 }
 
 function pilotosDoCampeonato(campeonato) {
@@ -672,7 +724,8 @@ async function salvarArquivoSemPreviewNoFirestore({ campeonato, etapa, dataCorri
 
 async function salvarPilotoGlobalNoFirestore(p, campeonato) {
     const item = normalizarIdentidadePilotoVinculado(p);
-    const pilotoSelecionado = getPilotoSelecionadoImportacao(item);
+    const pilotUid = getPilotUid(p) || DriverIdentity.ensurePilotUid(item);
+    const pilotoSelecionado = DB.pilotos.find(pilot => getPilotUid(pilot) === pilotUid) || getPilotoSelecionadoImportacao(item);
     const idPilotoBruto = String(item.driver_id || item.id_piloto || "").trim();
     const nomeArquivo = String(item.driver_name || item.nome || item.piloto || "").trim();
     const pilotoSimilarSemId = !pilotoSelecionado && idPilotoBruto && nomeArquivo
@@ -707,6 +760,7 @@ async function salvarPilotoGlobalNoFirestore(p, campeonato) {
 
     const payload = toFirestoreSafe({
         ...dadosAtuais,
+        pilot_uid: pilotUid,
         id_piloto: idFinal,
         driver_id: idFinal,
         nome: nomeFinal,
@@ -2230,7 +2284,9 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
         caminhoFirestore: `${COLLECTION_CAMPEONATOS}/${campeonatoDocId}/resultado_final/${resultadoDocId}`
     }), { merge: true });
 
-    const selecionadosCanonicos = (selecionados || []).map(normalizarIdentidadePilotoVinculado);
+    const vinculados = (selecionados || []).map(normalizarIdentidadePilotoVinculado);
+    const resolucaoIdentidade = await resolverPersistirIdentidades(vinculados, null, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: cfg.tipo });
+    const selecionadosCanonicos = resolucaoIdentidade.rows;
 
     await salvarPilotosImportadosNoFirestore({
         campeonato,
@@ -2242,7 +2298,7 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
     const resumoField = cfg.tipo === "classificacao" ? "classificacaoResumo" : "resultadoFinalResumo";
 
     selecionadosCanonicos.forEach((p, idx) => {
-        const itemId = normalizarDocId(p.driver_id || p.driver_name || `piloto_${idx + 1}`);
+        const itemId = FirestoreIntegrity.requireFirestoreId(p.pilot_uid, "pilot_uid", { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: cfg.tipo, index: idx });
         const ref = resultadoDocRef.collection(subcollectionName).doc(itemId);
 
         batch.set(ref, toFirestoreSafe({
@@ -2256,6 +2312,10 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
             idImportacao: importId,
             nomeArquivo: nomeArquivo || "",
             id_piloto: p.driver_id || "",
+            pilot_uid: p.pilot_uid,
+            driver_name_display: p.driver_name_display || p.driver_name || "",
+            driver_name_original: p.driver_name_original || p.driver_name || "",
+            normalizationVersion: NORMALIZATION_VERSION,
             posicao_geral_arquivo: Number(p.posicao_final || p.pos || p.posicao_geral_arquivo || 0),
             kart_numero: p.kart_numero || "",
             melhor_tempo: p.melhor_tempo || "",
@@ -2285,6 +2345,7 @@ async function salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, c
             atualizadoEmISO: agoraISO,
             pilotosSelecionados: selecionadosCanonicos.map((p, idx) => ({
                 ordem: idx + 1,
+                pilot_uid: p.pilot_uid,
                 id_piloto: p.driver_id || "",
                 driver_id: p.driver_id || "",
                 driver_name: p.driver_name || "",
@@ -2980,7 +3041,7 @@ async function confirmarImportacao() {
         }
 
         if (status) {
-            status.innerHTML = `✅ Importação concluída: ${selecionados.length} piloto(s) gravado(s) no Firestore. Caminho: ${htmlEscape(saveInfo.caminhoFirestore)}.${historiaMsg ? `<br>${htmlEscape(historiaMsg)}` : ""}`;
+            status.innerHTML = `✅ Importação concluída e resumos atualizados. ${selecionados.length} piloto(s) processado(s).${historiaMsg ? `<br>${htmlEscape(historiaMsg)}` : ""}`;
         }
 
         alert(`✅ Importação concluída com ${selecionados.length} piloto(s).${historiaMsg ? " História IA processada." : ""}`);
@@ -4938,6 +4999,8 @@ function limparCacheDashboardCampeonato(campeonatoDocId = "") {
 }
 
 function dashboardPilotoKey(item) {
+    const pilotUid = getPilotUid(item);
+    if (pilotUid) return `pilot:${pilotUid}`;
     const id = String(item?.driver_id || item?.id_piloto || item?.driverId || item?.docId || "").trim();
     if (id) return `id:${id}`;
     const nome = normalizarNomeComparacao(item?.driver_name || item?.nome || item?.piloto || "");
@@ -5085,13 +5148,14 @@ function dashboardCanonicalizarVoltasEtapa(voltas, corrida, classificacao, pilot
 
         return {
             ...v,
+            pilot_uid: getPilotUid(match),
             driver_id_arquivo: String(v.driver_id || v.id_piloto || "").trim(),
             driver_name_arquivo: String(v.driver_name || v.nome || "").trim(),
             driver_id: driverId,
             id_piloto: driverId,
             driver_name: driverName,
             nome: driverName,
-            isChampionship: stageDriverMap.ids.has(driverId),
+            isChampionship: stageDriverMap.uids?.has(getPilotUid(match)) || stageDriverMap.ids.has(driverId),
             identityResolution: resolution.resolution,
             piloto_doc_id: match.piloto_doc_id || match.pilotoVinculadoDocId || ""
         };
@@ -5898,6 +5962,7 @@ const DASHBOARD_RESUMO_VERSION = 5;
 function dashboardPilotoPersistivel(item) {
     if (!item) return null;
     return toFirestoreSafe({
+        pilot_uid: getPilotUid(item),
         driver_id: item.driver_id || item.id_piloto || "",
         id_piloto: item.id_piloto || item.driver_id || "",
         driver_name: item.driver_name || item.nome || item.piloto || "-",
@@ -5927,6 +5992,7 @@ function dashboardPilotoPersistivel(item) {
 function dashboardPilotoMetricaPersistivel(item) {
     if (!item) return null;
     return toFirestoreSafe({
+        pilot_uid: getPilotUid(item),
         driver_id: item.driver_id || item.id_piloto || "",
         id_piloto: item.id_piloto || item.driver_id || "",
         driver_name: item.driver_name || item.nome || item.piloto || "-",
@@ -6208,6 +6274,26 @@ async function dashboardLimparLinhasFantasmaVoltaAVolta(resultadoDocRef) {
     return fantasmas.length;
 }
 
+async function persistirEstruturaNormalizadaEtapa(resultadoDocRef, corrida, classificacao, voltas) {
+    const collections = ["pilotos_resultado_v2", "classificacao_v2", "voltas_processadas_v2"];
+    const old = await Promise.all(collections.map(name => resultadoDocRef.collection(name).get()));
+    const ops = old.flatMap(snapshot => snapshot.docs.map(doc => ({ tipo: "delete", ref: doc.ref })));
+    const add = (collection, row) => {
+        const pilotUid = FirestoreIntegrity.requireFirestoreId(getPilotUid(row), "pilot_uid", { collection });
+        ops.push({ tipo: "set", ref: resultadoDocRef.collection(collection).doc(pilotUid), payload: toFirestoreSafe({ ...row, pilot_uid: pilotUid, driver_id: getDriverId(row) || null, normalizationVersion: NORMALIZATION_VERSION }) });
+    };
+    (corrida || []).forEach(row => add("pilotos_resultado_v2", row));
+    (classificacao || []).forEach(row => add("classificacao_v2", row));
+    const byPilot = new Map();
+    (voltas || []).forEach(lap => {
+        const pilotUid = FirestoreIntegrity.requireFirestoreId(getPilotUid(lap), "pilot_uid", { collection: "voltas_processadas_v2" });
+        if (!byPilot.has(pilotUid)) byPilot.set(pilotUid, []);
+        byPilot.get(pilotUid).push(lap);
+    });
+    byPilot.forEach((laps, pilotUid) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("voltas_processadas_v2").doc(pilotUid), payload: toFirestoreSafe({ pilot_uid: pilotUid, driver_id: getDriverId(laps[0]) || null, laps, normalizationVersion: NORMALIZATION_VERSION }) }));
+    await executarBatchFirestore(ops);
+}
+
 async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, conteudoVoltaAtual = "", nomeArquivoVoltaAtual = "", idImportacaoVoltaAtual = "", atualizarGeral = true }) {
     const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
     const resultadoDocId = FirestoreIntegrity.requireFirestoreId(getResultadoFinalDocId(etapa, dataCorrida), "etapaId", { campeonato, etapa, dataCorrida });
@@ -6234,31 +6320,37 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
     // Usa literalmente a origem que hidrata "Resultado da Etapa". Analytics
     // antigos podem ter apenas parte dos oficiais na subcollection, enquanto
     // dashboardResumo.corrida preserva o resultado completo exibido (11 x 6).
-    const corrida = DriverIdentity.getStageReferenceRows(meta, corridaCollection, classificacaoCollection);
+    const registry = await carregarIdentidadesPilotos();
+    const corridaFallback = corridaCollection.length ? corridaCollection : (meta.resultadoFinalResumo?.pilotosSelecionados || []);
+    const classificacaoFallback = classificacaoCollection.length ? classificacaoCollection : (meta.classificacaoResumo?.pilotosSelecionados || []);
+    const corridaRaw = DriverIdentity.getStageReferenceRows(meta, corridaFallback, classificacaoFallback);
+    const corridaResolvida = await resolverPersistirIdentidades(corridaRaw, registry, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "resultado_final" });
+    const corrida = corridaResolvida.rows;
+    const classificacaoResolvida = await resolverPersistirIdentidades(classificacaoFallback, corridaResolvida.identities, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "classificacao" });
     const oficiaisEtapa = DriverIdentity.getOfficialStageDriverIds(corrida, pilotosCadastrados.pilotos);
-    if (oficiaisEtapa.missingDriverIds.length) {
-        throw new Error(`driverId obrigatório ausente no reprocessamento (${JSON.stringify({ campeonato: campeonatoDocId, etapa: resultadoDocId, pilotos: oficiaisEtapa.missingDriverIds.map(DriverIdentity.getDriverName) })})`);
-    }
     const pilotosCampeonato = {
         pilotos: oficiaisEtapa.drivers,
         ids: oficiaisEtapa.ids,
+        uids: oficiaisEtapa.uids,
         nomesLegados: oficiaisEtapa.legacyNames,
         nomes: oficiaisEtapa.legacyNames
     };
-    const classificacao = DriverIdentity.filterStageQualifying(classificacaoCollection, oficiaisEtapa);
-    const classificacaoIds = new Set(classificacao.map(getDriverId));
-    oficiaisEtapa.ids.forEach(driverId => {
-        if (!classificacaoIds.has(driverId)) console.warn("[Kart] piloto oficial ausente na classificação", { campeonatoId: campeonatoDocId, etapaId: resultadoDocId, driver_id: driverId });
+    const classificacao = DriverIdentity.filterStageQualifying(classificacaoResolvida.rows, oficiaisEtapa);
+    const classificacaoUids = new Set(classificacao.map(getPilotUid));
+    oficiaisEtapa.uids.forEach(pilotUid => {
+        if (!classificacaoUids.has(pilotUid)) console.warn("[Kart] piloto oficial ausente na classificação", { campeonatoId: campeonatoDocId, etapaId: resultadoDocId, pilot_uid: pilotUid });
     });
     const voltaInfo = await dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVoltaAtual, nomeArquivoVoltaAtual, idImportacaoVoltaAtual);
     const vinculosVolta = vinculosVoltaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
-    const voltasCanonicas = dashboardCanonicalizarVoltasEtapa(
+    const voltasPreCanonicas = dashboardCanonicalizarVoltasEtapa(
         voltaInfo.voltas || [],
         corrida,
         classificacao,
         pilotosCampeonato,
         vinculosVolta
     );
+    const voltasResolvidas = await resolverPersistirIdentidades(voltasPreCanonicas, classificacaoResolvida.identities, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "volta_a_volta" });
+    const voltasCanonicas = voltasResolvidas.rows.map(row => ({ ...row, isChampionship: oficiaisEtapa.uids.has(getPilotUid(row)) }));
     // Preserve the complete race. Championship membership is persisted as a
     // flag and filtering is exclusively a presentation concern.
     const etapaObj = { docId: resultadoDocId, ref: resultadoDocRef, meta, corrida, classificacao, voltas: voltasCanonicas };
@@ -6278,10 +6370,28 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         dashboardResumo: resumo,
         dashboardResumoVersao: DASHBOARD_RESUMO_VERSION,
         dashboardResumoAtualizadoEmISO: resumo.atualizadoEmISO,
+        normalizationVersion: NORMALIZATION_VERSION,
+        analyticsVersion: KartAnalytics.VERSION,
+        processedAtISO: new Date().toISOString(),
+        officialPilotUids: [...oficiaisEtapa.uids],
+        officialDriverIds: [...oficiaisEtapa.ids],
+        stageSummary: {
+            campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, dataCorrida,
+            officialPilotsCount: oficiaisEtapa.uids.size,
+            resultAvailable: corrida.length > 0,
+            qualifyingAvailable: classificacao.length > 0,
+            lapByLapAvailable: voltasCanonicas.length > 0,
+            analyticsAvailable: true,
+            normalizationVersion: NORMALIZATION_VERSION,
+            analyticsVersion: KartAnalytics.VERSION,
+            processedAtISO: new Date().toISOString()
+        },
         dashboardOculto: false,
         ultimoVoltaAVoltaImportado: voltaInfo.fonte?.idImportacao || meta.ultimoVoltaAVoltaImportado || "",
         atualizadoEmISO: new Date().toISOString()
     }), { merge: true });
+
+    await persistirEstruturaNormalizadaEtapa(resultadoDocRef, corrida, classificacao, voltasCanonicas);
 
     await persistirAnalyticsEtapa(resultadoDocRef, voltasCanonicas, pilotosCampeonato, voltaInfo.fonte, stat, meta);
 
@@ -6291,27 +6401,29 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
 }
 
 function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
-    const byId = rows => new Map((rows || []).map(row => [getDriverId(row), row]).filter(([id]) => id));
+    const identityKey = row => getPilotUid(row) || getDriverId(row);
+    const byId = rows => new Map((rows || []).map(row => [identityKey(row), row]).filter(([id]) => id));
     const resultados = byId(stat?.corrida), classificacao = byId(stat?.classificacao);
     const regularidade = byId(analytics.regularidade);
     const ultrapassagensCamp = byId(analytics.ultrapassagensCampeonato);
     const ultrapassagensGeral = byId(analytics.ultrapassagensGeral);
     const primeiro = analytics.snapshots?.[0]?.positions || [];
-    const primeiroCamp = KartAnalytics.filtrarSnapshot({ positions: primeiro }, new Set(pilotosLista.map(getDriverId)), "campeonato");
+    const primeiroCamp = KartAnalytics.filtrarSnapshot({ positions: primeiro }, new Set(pilotosLista.map(identityKey)), "campeonato");
     const rankBest = [...(analytics.regularidade || [])].filter(p => Number.isFinite(Number(p.bestLapValid))).sort((a, b) => Number(a.bestLapValid) - Number(b.bestLapValid));
     const agora = new Date().toISOString();
     return pilotosLista.map((driver, officialIndex) => {
-        const id = getDriverId(driver), result = resultados.get(id) || {}, quali = classificacao.get(id) || {};
+        const id = identityKey(driver), result = resultados.get(id) || {}, quali = classificacao.get(id) || {};
         const pace = regularidade.get(id) || {}, overCamp = ultrapassagensCamp.get(id) || {}, overAll = ultrapassagensGeral.get(id) || {};
-        const firstOverallIndex = primeiro.findIndex(p => getDriverId(p) === id), firstCampIndex = primeiroCamp.findIndex(p => getDriverId(p) === id);
+        const firstOverallIndex = primeiro.findIndex(p => identityKey(p) === id), firstCampIndex = primeiroCamp.findIndex(p => identityKey(p) === id);
         const resultPosition = dashboardPosicaoCampeonato(result) < 999999 ? dashboardPosicaoCampeonato(result) : officialIndex + 1;
         const qualifyingPosition = dashboardPosicaoCampeonato(quali) < 999999 ? dashboardPosicaoCampeonato(quali) : null;
-        const bestOverallIndex = rankBest.findIndex(p => getDriverId(p) === id);
+        const bestOverallIndex = rankBest.findIndex(p => identityKey(p) === id);
         const fastest = bestOverallIndex === 0;
         const pole = qualifyingPosition === 1, win = resultPosition === 1;
         return toFirestoreSafe({
             analyticsVersion: KartAnalytics.VERSION, processedAt: agora,
-            driver_id: String(id), driver_name_original: DriverIdentity.getDriverName(driver),
+            normalizationVersion: NORMALIZATION_VERSION, processedAtISO: agora,
+            pilot_uid: getPilotUid(driver), driver_id: getDriverId(driver) || null, driver_name_original: DriverIdentity.getDriverName(driver),
             driver_name_display: DriverIdentity.getDriverDisplayName(driver), kart_numero: DriverIdentity.normalizeKartNumber(driver.kart_numero || driver.kart),
             campeonato_id: meta?.campeonato_id || "", campeonato: meta?.campeonato || "", etapa_id: meta?.resultadoDocId || "", etapa: Number(meta?.etapa || 0), dataCorrida: meta?.dataCorrida || "",
             result: { positionOverall: Number(result.posicao_geral_arquivo || result.posicao_final || resultPosition), positionChampionship: resultPosition, points: Number(result.pontos || 0) + Number(result.melhor_tempo_ponto || 0) },
@@ -6319,8 +6431,8 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
             start: { gridPosition: qualifyingPosition, firstLapPosition: firstCampIndex >= 0 ? firstCampIndex + 1 : null, firstLapPositionOverall: firstOverallIndex >= 0 ? firstOverallIndex + 1 : null, delta: qualifyingPosition && firstCampIndex >= 0 ? qualifyingPosition - (firstCampIndex + 1) : null },
             pace: { bestLap: pace.bestLapValid ?? null, pace: pace.pace ?? null, regularity: pace.regularidade ?? null, cleanLaps: Number(pace.cleanLapsCount || 0), totalLaps: Number(pace.totalLaps || 0), status: pace.status || "voltas_insuficientes" },
             overtakes: { madeOverall: Number(overAll.feitas || 0), takenOverall: Number(overAll.tomadas || 0), balanceOverall: Number(overAll.saldo || 0), madeChampionship: Number(overCamp.feitas || 0), takenChampionship: Number(overCamp.tomadas || 0), balanceChampionship: Number(overCamp.saldo || 0) },
-            bestLapRank: { overall: bestOverallIndex >= 0 ? bestOverallIndex + 1 : null, championship: bestOverallIndex >= 0 ? rankBest.filter((p, i) => i <= bestOverallIndex && pilotosLista.some(d => getDriverId(d) === getDriverId(p))).length : null },
-            achievements: { pole, win, podium: resultPosition <= 3, fastestLap: fastest, hatTrick: pole && win && fastest, grandChelem: getDriverId(stat?.grandChelem) === id }
+            bestLapRank: { overall: bestOverallIndex >= 0 ? bestOverallIndex + 1 : null, championship: bestOverallIndex >= 0 ? rankBest.filter((p, i) => i <= bestOverallIndex && pilotosLista.some(d => identityKey(d) === identityKey(p))).length : null },
+            achievements: { pole, win, podium: resultPosition <= 3, fastestLap: fastest, hatTrick: pole && win && fastest, grandChelem: identityKey(stat?.grandChelem) === id }
         });
     });
 }
@@ -6328,7 +6440,7 @@ function montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta) {
 async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonato, fonte = {}, stat = null, meta = {}) {
     const analyticsRef = resultadoDocRef.collection("analytics").doc("volta_a_volta_v1");
     const pilotosLista = Array.isArray(pilotosCampeonato) ? pilotosCampeonato : (pilotosCampeonato?.pilotos || []);
-    pilotosLista.forEach(driver => FirestoreIntegrity.requireFirestoreId(getDriverId(driver), "driverId", { campeonatoId: meta?.campeonato_id, etapaId: meta?.resultadoDocId, driver: DriverIdentity.getDriverName(driver) }));
+    pilotosLista.forEach(driver => FirestoreIntegrity.requireFirestoreId(getPilotUid(driver), "pilot_uid", { campeonatoId: meta?.campeonato_id, etapaId: meta?.resultadoDocId, driver: DriverIdentity.getDriverName(driver) }));
     // Todo o cálculo e a validação acontecem antes de qualquer exclusão.
     const analytics = KartAnalytics.processarVoltasEtapa(voltas || [], pilotosLista, stat?.classificacao || []);
     const pilotAnalytics = montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta);
@@ -6344,42 +6456,42 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     ];
     if (!voltas?.length) {
         const ops = [...limpeza, { tipo: "set", ref: analyticsRef, payload: { analyticsVersion: KartAnalytics.VERSION, available: false, fonte: fonte || {}, processedAt: new Date().toISOString() } }];
-        pilotAnalytics.forEach(item => ops.push({ tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(FirestoreIntegrity.requireFirestoreId(item.driver_id, "driverId", { etapaId: meta?.resultadoDocId })), payload: item }));
+        pilotAnalytics.forEach(item => ops.push({ tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(FirestoreIntegrity.requireFirestoreId(item.pilot_uid, "pilot_uid", { etapaId: meta?.resultadoDocId })), payload: item }));
         await executarBatchFirestore(ops);
         return null;
     }
-    const idsOficiais = pilotosLista.map(getDriverId).filter(Boolean);
+    const idsOficiais = pilotosLista.map(getPilotUid).filter(Boolean);
     const participantes = new Map();
     voltas.forEach(v => {
-        const id = String(v.driver_id || normalizarNomeComparacao(v.driver_name));
-        if (!participantes.has(id)) participantes.set(id, { driver_id: String(v.driver_id || ""), driver_name: v.driver_name || id, kart_numero: v.kart_numero || "", isChampionship: idsOficiais.includes(normalizarDriverId(v.driver_id)) });
+        const id = getPilotUid(v);
+        if (!participantes.has(id)) participantes.set(id, { pilot_uid: id, driver_id: getDriverId(v) || null, driver_name: v.driver_name || id, kart_numero: v.kart_numero || "", isChampionship: idsOficiais.includes(id) });
     });
-    const resolvedIds = new Set(voltas.map(v => normalizarDriverId(v.driver_id)).filter(id => idsOficiais.includes(id)));
+    const resolvedIds = new Set(voltas.map(getPilotUid).filter(id => idsOficiais.includes(id)));
     const analyticsValidation = {
         resultDrivers: idsOficiais.length,
         resolvedChampionshipDrivers: resolvedIds.size,
-        regularityDrivers: analytics.regularidade.filter(p => idsOficiais.includes(getDriverId(p))).length,
+        regularityDrivers: analytics.regularidade.filter(p => idsOficiais.includes(getPilotUid(p))).length,
         overtakeDrivers: analytics.ultrapassagensCampeonato.length,
         pilotAnalyticsDrivers: pilotosLista.length,
         snapshots: analytics.snapshots.map(snapshot => ({ lap: snapshot.lap || snapshot.numeroVolta, count: KartAnalytics.filtrarSnapshot(snapshot, new Set(idsOficiais), "campeonato").length })),
         extras: analytics.snapshots.flatMap(snapshot => (snapshot.positions || []).filter(p => p.isChampionship && !idsOficiais.includes(getDriverId(p))).map(getDriverId)),
-        missing: pilotosLista.filter(p => !resolvedIds.has(getDriverId(p))).map(p => getDriverId(p)),
-        unresolvedDrivers: pilotosLista.filter(p => !resolvedIds.has(getDriverId(p))).map(p => ({ driverId: getDriverId(p), name: DriverIdentity.getDriverName(p), kartNumber: p.kart_numero || "" }))
+        missing: pilotosLista.filter(p => !resolvedIds.has(getPilotUid(p))).map(p => getPilotUid(p)),
+        unresolvedDrivers: pilotosLista.filter(p => !resolvedIds.has(getPilotUid(p))).map(p => ({ pilotUid: getPilotUid(p), driverId: getDriverId(p) || null, name: DriverIdentity.getDriverName(p), kartNumber: p.kart_numero || "" }))
     };
-    const validation = FirestoreIntegrity.validateStageAnalytics({ officialDrivers: pilotosLista, regularity: analytics.regularidade, qualifying: stat?.classificacao, overtakes: analytics.ultrapassagensCampeonato, pilotAnalytics, snapshots: analytics.snapshots }, getDriverId);
+    const validation = FirestoreIntegrity.validateStageAnalytics({ officialDrivers: pilotosLista, regularity: analytics.regularidade, qualifying: stat?.classificacao, overtakes: analytics.ultrapassagensCampeonato, pilotAnalytics, snapshots: analytics.snapshots }, getPilotUid);
     analyticsValidation.consistency = validation;
     validation.snapshots.forEach(snapshot => { if (snapshot.missing.length) console.warn("[Kart/Snapshot]", snapshot); });
     const ops = [...limpeza, { tipo: "set", ref: analyticsRef, payload: toFirestoreSafe({ ...analytics, analyticsValidation, available: true, fonte: fonte || {}, processedAt: new Date().toISOString() }) }];
-    participantes.forEach((p, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("participantes_etapa").doc(FirestoreIntegrity.requireFirestoreId(normalizarDocId(id), "driverId", { etapaId: meta?.resultadoDocId, collection: "participantes_etapa" })), payload: p }));
+    participantes.forEach((p, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("participantes_etapa").doc(FirestoreIntegrity.requireFirestoreId(id, "pilot_uid", { etapaId: meta?.resultadoDocId, collection: "participantes_etapa" })), payload: p }));
     const porPiloto = new Map();
     voltas.forEach(v => {
-        const id = String(v.driver_id || normalizarNomeComparacao(v.driver_name));
+        const id = getPilotUid(v);
         if (!porPiloto.has(id)) porPiloto.set(id, []);
         porPiloto.get(id).push(v);
     });
-    porPiloto.forEach((laps, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("voltas_processadas").doc(FirestoreIntegrity.requireFirestoreId(normalizarDocId(id), "driverId", { etapaId: meta?.resultadoDocId, collection: "voltas_processadas" })), payload: { driver_id: id, laps } }));
+    porPiloto.forEach((laps, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("voltas_processadas").doc(FirestoreIntegrity.requireFirestoreId(id, "pilot_uid", { etapaId: meta?.resultadoDocId, collection: "voltas_processadas" })), payload: { pilot_uid: id, driver_id: getDriverId(laps[0]) || null, laps } }));
     pilotAnalytics.forEach(item => ops.push({
-        tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(FirestoreIntegrity.requireFirestoreId(item.driver_id, "driverId", { etapaId: meta?.resultadoDocId, collection: "pilot_analytics" })), payload: item
+        tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(FirestoreIntegrity.requireFirestoreId(item.pilot_uid, "pilot_uid", { etapaId: meta?.resultadoDocId, collection: "pilot_analytics" })), payload: item
     }));
     await executarBatchFirestore(ops);
     return analytics;
@@ -6449,6 +6561,15 @@ async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeona
         dashboardGeral: resumoGeral,
         dashboardGeralVersao: DASHBOARD_RESUMO_VERSION,
         dashboardGeralAtualizadoEmISO: resumoGeral.atualizadoEmISO,
+        championshipSummary: {
+            etapas: stats.length,
+            pilotos: ranking.length,
+            corridas: stats.length,
+            classificacaoGeral: ranking,
+            normalizationVersion: NORMALIZATION_VERSION,
+            analyticsVersion: KartAnalytics.VERSION,
+            processedAtISO: new Date().toISOString()
+        },
         atualizadoEmISO: new Date().toISOString()
     }), { merge: true });
 
@@ -6462,7 +6583,7 @@ async function recalcularEPersistirDashboardAposImportacao(args) {
     } catch (e) {
         console.error("Falha ao persistir resumo do dashboard:", e);
         const status = document.getElementById("statusImport");
-        if (status) status.innerHTML += `<br>⚠️ Dados da importação foram salvos, mas o resumo do dashboard falhou: ${htmlEscape(e.message || e)}`;
+        if (status) status.innerHTML = `❌ Falha no processamento. Campeonato: ${htmlEscape(args?.campeonato || "-")} · Etapa: ${htmlEscape(args?.etapa || "-")} · Fase: resumos · ${htmlEscape(e.message || e)}`;
         return null;
     }
 }
@@ -6585,6 +6706,31 @@ async function reprocessarResumosDashboardCampeonatoAtual() {
     }
 }
 window.reprocessarResumosDashboardCampeonatoAtual = reprocessarResumosDashboardCampeonatoAtual;
+
+// Administrative API. It is deliberately dry-run by default and never touches
+// campeonato configuration, Pilotos or pilot_identities.
+async function limparDadosImportacaoCampeonato(campeonato, { dryRun = true } = {}) {
+    const campeonatoId = FirestoreIntegrity.requireFirestoreId(normalizarDocId(campeonato), "campeonatoId", { fase: "clean_reimport" });
+    const campRef = firestore.collection(COLLECTION_CAMPEONATOS).doc(campeonatoId);
+    const stageSnap = await campRef.collection("resultado_final").get();
+    const lapSnap = await campRef.collection("volta_a_volta").get();
+    const backupSnap = await firestore.collection(COLLECTION_BACKUPS).where("campeonato_id", "==", campeonatoId).get();
+    const subcollections = ["pilotos_resultado", "classificacao", "volta_a_volta_pilotos", "historias_pilotos", "analytics", "participantes_etapa", "voltas_processadas", "pilot_analytics", "pilotos_resultado_v2", "classificacao_v2", "voltas_processadas_v2"];
+    const refs = [...lapSnap.docs.map(doc => doc.ref), ...backupSnap.docs.map(doc => doc.ref)];
+    for (const stage of stageSnap.docs) {
+        const children = await Promise.all(subcollections.map(name => stage.ref.collection(name).get()));
+        children.forEach(snapshot => snapshot.docs.forEach(doc => refs.push(doc.ref)));
+        refs.push(stage.ref);
+    }
+    const report = { campeonato_id: campeonatoId, dryRun, stages: stageSnap.size, lapFiles: lapSnap.size, backups: backupSnap.size, documents: refs.length };
+    if (dryRun) return report;
+    await executarBatchFirestore(refs.map(ref => ({ tipo: "delete", ref })));
+    const del = firestoreDeleteValue();
+    await campRef.set({ dashboardGeral: del, dashboardGeralVersao: del, dashboardGeralAtualizadoEmISO: del, championshipSummary: del, atualizadoEmISO: new Date().toISOString() }, { merge: true });
+    limparCacheDashboardCampeonato(campeonatoId);
+    return report;
+}
+window.limparDadosImportacaoCampeonato = limparDadosImportacaoCampeonato;
 
 /* V4: consulta apenas resumos persistidos; exclusão também recalcula dashboard e etapas vazias ficam ocultas. */
 async function carregarDashboardCampeonato(campeonatoDocId, force = false) {
@@ -6719,6 +6865,7 @@ const DASHBOARD_STAGE_STATE = {
     etapaId: "",
     pilotosCampeonatoEtapa: [],
     pilotosCampeonatoIds: new Set(),
+    pilotosCampeonatoUids: new Set(),
     pilotosCampeonatoNomesLegados: new Set()
 };
 
@@ -6727,6 +6874,7 @@ function limparPilotosCampeonatoEtapa() {
     DASHBOARD_STAGE_STATE.etapaId = "";
     DASHBOARD_STAGE_STATE.pilotosCampeonatoEtapa = [];
     DASHBOARD_STAGE_STATE.pilotosCampeonatoIds = new Set();
+    DASHBOARD_STAGE_STATE.pilotosCampeonatoUids = new Set();
     DASHBOARD_STAGE_STATE.pilotosCampeonatoNomesLegados = new Set();
     ETAPA_ANALYTICS_ATUAL = null;
 }
@@ -6738,6 +6886,7 @@ function obterPilotosOficiaisDaEtapa(campeonatoId, etapaId, resultadoEtapa) {
     DASHBOARD_STAGE_STATE.etapaId = etapaId;
     DASHBOARD_STAGE_STATE.pilotosCampeonatoEtapa = oficiais.drivers;
     DASHBOARD_STAGE_STATE.pilotosCampeonatoIds = oficiais.ids;
+    DASHBOARD_STAGE_STATE.pilotosCampeonatoUids = oficiais.uids;
     DASHBOARD_STAGE_STATE.pilotosCampeonatoNomesLegados = oficiais.legacyNames;
     console.debug("[Kart] pilotos oficiais da etapa:", [...oficiais.ids]);
     return oficiais.drivers;
@@ -6747,6 +6896,7 @@ function pilotosOficiaisAtuais() {
     return {
         drivers: DASHBOARD_STAGE_STATE.pilotosCampeonatoEtapa,
         ids: DASHBOARD_STAGE_STATE.pilotosCampeonatoIds,
+        uids: DASHBOARD_STAGE_STATE.pilotosCampeonatoUids,
         legacyNames: DASHBOARD_STAGE_STATE.pilotosCampeonatoNomesLegados
     };
 }
@@ -6839,10 +6989,10 @@ function racePositionsForSnapshot(snapshot, mode = RACE_MODE) {
     const rows = Array.isArray(snapshot?.positions) ? snapshot.positions : [];
     if (mode === "geral") return rows;
     const snapshotRenderizado = rows
-        .filter(p => DASHBOARD_STAGE_STATE.pilotosCampeonatoIds.has(String(p.driver_id)))
+        .filter(p => DASHBOARD_STAGE_STATE.pilotosCampeonatoUids.has(getPilotUid(p)) || DASHBOARD_STAGE_STATE.pilotosCampeonatoIds.has(String(p.driver_id)))
         .map((p, index) => ({ ...p, positionChampionship: index + 1 }));
-    const expectedIds = DASHBOARD_STAGE_STATE.pilotosCampeonatoIds;
-    const visibleIds = new Set(snapshotRenderizado.map(p => String(p.driver_id)));
+    const expectedIds = DASHBOARD_STAGE_STATE.pilotosCampeonatoUids.size ? DASHBOARD_STAGE_STATE.pilotosCampeonatoUids : DASHBOARD_STAGE_STATE.pilotosCampeonatoIds;
+    const visibleIds = new Set(snapshotRenderizado.map(p => getPilotUid(p) || String(p.driver_id)));
     const extras = [...visibleIds].filter(id => !expectedIds.has(id));
     if (extras.length) {
         console.warn("[Kart] Evolução contém piloto externo no modo Campeonato", {
