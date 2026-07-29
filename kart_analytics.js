@@ -404,15 +404,41 @@
     }
     function consolidarPilotAnalytics(rows, { campeonatoId = "", etapaId = "all" } = {}) {
         const stages = (rows || []).filter(row => (!campeonatoId || row.campeonato_id === campeonatoId) && (!etapaId || etapaId === "all" || row.etapa_id === etapaId));
+        const countPosition = (path, predicate) => stages.filter(row => {
+            const value = num(path(row));
+            return value !== null && value > 0 && predicate(value);
+        }).length;
+        const bestPosition = path => {
+            const positions = stages.map(path).map(num).filter(value => value !== null && value > 0);
+            return positions.length ? Math.min(...positions) : null;
+        };
+        const wins = {
+            overall: countPosition(row => row.result?.positionOverall, position => position === 1),
+            championship: countPosition(row => row.result?.positionChampionship, position => position === 1)
+        };
+        const podiums = {
+            overall: countPosition(row => row.result?.positionOverall, position => position <= 3),
+            championship: countPosition(row => row.result?.positionChampionship, position => position <= 3)
+        };
+        const poles = {
+            overall: countPosition(row => row.qualifying?.positionOverall, position => position === 1),
+            championship: countPosition(row => row.qualifying?.positionChampionship, position => position === 1)
+        };
         return {
             stages,
             kpis: {
                 races: stages.length,
-                wins: stages.filter(row => row.achievements?.win).length,
-                podiums: stages.filter(row => row.achievements?.podium).length,
-                poles: stages.filter(row => row.achievements?.pole).length,
+                wins,
+                podiums,
+                poles,
                 points: stages.reduce((sum, row) => sum + Number(row.result?.points || 0), 0),
-                titles: 0
+                bestPosition: {
+                    overall: bestPosition(row => row.result?.positionOverall),
+                    championship: bestPosition(row => row.result?.positionChampionship)
+                },
+                winsLegacy: wins.championship,
+                podiumsLegacy: podiums.championship,
+                polesLegacy: poles.championship
             }
         };
     }

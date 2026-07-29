@@ -192,15 +192,31 @@ test("regularidade ignora volta 1 e joker extremamente rapido", () => {
 
 test("dashboard do piloto consolida campeonato e filtra etapa especifica", () => {
     const rows = [
-        { campeonato_id: "camp-a", etapa_id: "e1", result: { points: 20 }, achievements: { win: true, podium: true, pole: true } },
-        { campeonato_id: "camp-a", etapa_id: "e2", result: { points: 15 }, achievements: { podium: true } },
-        { campeonato_id: "camp-b", etapa_id: "e1", result: { points: 10 }, achievements: {} }
+        { campeonato_id: "camp-a", etapa_id: "e1", result: { positionOverall: 4, positionChampionship: 1, points: 20 }, qualifying: { positionOverall: 3, positionChampionship: 1 } },
+        { campeonato_id: "camp-a", etapa_id: "e2", result: { positionOverall: 2, positionChampionship: 2, points: 15 }, qualifying: { positionOverall: 4, positionChampionship: 2 } },
+        { campeonato_id: "camp-b", etapa_id: "e1", result: { positionOverall: 1, positionChampionship: 1, points: 10 }, qualifying: { positionOverall: 1, positionChampionship: 1 } }
     ];
     const all = analytics.consolidarPilotAnalytics(rows, { campeonatoId: "camp-a", etapaId: "all" });
-    assert.deepEqual(all.kpis, { races: 2, wins: 1, podiums: 2, poles: 1, points: 35, titles: 0 });
+    assert.deepEqual(all.kpis.wins, { overall: 0, championship: 1 });
+    assert.deepEqual(all.kpis.podiums, { overall: 1, championship: 2 });
+    assert.deepEqual(all.kpis.poles, { overall: 0, championship: 1 });
+    assert.deepEqual(all.kpis.bestPosition, { overall: 2, championship: 1 });
+    assert.equal(all.kpis.races, 2);
+    assert.equal(all.kpis.points, 35);
     const stage = analytics.consolidarPilotAnalytics(rows, { campeonatoId: "camp-a", etapaId: "e2" });
     assert.equal(stage.stages.length, 1);
     assert.equal(stage.kpis.points, 15);
+    assert.deepEqual(stage.kpis.bestPosition, { overall: 2, championship: 2 });
+});
+
+test("posicao zero nunca conta em KPIs nem como melhor colocacao", () => {
+    const result = analytics.consolidarPilotAnalytics([
+        { result: { positionOverall: 0, positionChampionship: 0 }, qualifying: { positionOverall: 0, positionChampionship: 0 } }
+    ]).kpis;
+    assert.deepEqual(result.wins, { overall: 0, championship: 0 });
+    assert.deepEqual(result.podiums, { overall: 0, championship: 0 });
+    assert.deepEqual(result.poles, { overall: 0, championship: 0 });
+    assert.deepEqual(result.bestPosition, { overall: null, championship: null });
 });
 
 test("pilot_uid independe de kart e RENTAL", () => {

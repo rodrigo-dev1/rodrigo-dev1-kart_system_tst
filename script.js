@@ -6678,11 +6678,14 @@ async function persistirPilotSummariesCampeonato(campRef, campeonatoDocId) {
             const values = items.map(field).map(Number).filter(Number.isFinite);
             return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
         };
+        const summary = KartAnalytics.consolidarPilotAnalytics(items).kpis;
         ops.push({ tipo: "set", ref: campRef.collection("pilot_summaries").doc(uid), payload: toFirestoreSafe({
             pilot_uid: uid, driver_id: getDriverId(first) || null, driver_name: first.driver_name_display || first.driver_name_original || uid, driver_name_display: first.driver_name_display || first.driver_name_original || uid,
             campeonato_id: campeonatoDocId, etapasDisputadas: items.length, corridas: items.length,
-            vitorias: items.filter(x => x.achievements?.win).length, podios: items.filter(x => x.achievements?.podium).length,
-            poles: items.filter(x => x.achievements?.pole).length, pontos: items.reduce((s, x) => s + Number(x.result?.points || 0), 0),
+            // Os escalares em português permanecem para consumidores legados.
+            vitorias: summary.wins.championship, podios: summary.podiums.championship,
+            poles: summary.poles.championship, pontos: summary.points,
+            summary: { races: summary.races, wins: summary.wins, podiums: summary.podiums, poles: summary.poles, points: summary.points, bestPosition: summary.bestPosition },
             melhorVoltas: items.filter(x => x.achievements?.fastestLap).length, regularidadeMedia: average(x => x.pace?.regularity),
             paceRelativoMedio: average(x => x.pace?.pace), ultrapassagensFeitas: items.reduce((s, x) => s + Number(x.overtakes?.madeOverall || 0), 0),
             ultrapassagensTomadas: items.reduce((s, x) => s + Number(x.overtakes?.takenOverall || 0), 0), atualizadoEmISO: new Date().toISOString()
