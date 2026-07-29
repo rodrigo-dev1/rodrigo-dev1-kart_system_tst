@@ -5127,6 +5127,17 @@ function dashboardOrdenarResultado(rows) {
     );
 }
 
+function dashboardOrdenarGeral(rows) {
+    const positionOverall = item => {
+        for (const value of [item?.posicao_geral_arquivo, item?.positionOverall, item?.posicao_final, item?.posicao, item?.pos]) {
+            const position = Number(value);
+            if (Number.isFinite(position) && position > 0) return position;
+        }
+        return Infinity;
+    };
+    return [...(rows || [])].sort((a, b) => positionOverall(a) - positionOverall(b) || dashboardNomePiloto(a).localeCompare(dashboardNomePiloto(b)));
+}
+
 function dashboardCanonicalizarVoltasEtapa(voltas, corrida, classificacao, pilotosCampeonato = [], vinculosVolta = []) {
     // buscarPilotosDoCampeonatoRankingFirestore retorna um objeto com Sets
     // (ids/nomes) e, a partir da V4, também a lista canônica de pilotos.
@@ -5255,7 +5266,7 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
     });
 
     const grid = new Map();
-    dashboardOrdenarResultado(classificacao).forEach((p, idx) => grid.set(dashboardPilotoKey(p), idx + 1));
+    dashboardOrdenarGeral(classificacao).forEach((p, idx) => grid.set(dashboardPilotoKey(p), idx + 1));
 
     const voltasPorNumero = new Map();
     preparadas.forEach(v => {
@@ -5289,7 +5300,7 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
                 const posGrid = grid.get(item.key);
                 if (posGrid) {
                     const ganho = posGrid - item.pos;
-                    if (!melhorLargada || ganho > melhorLargada.ganho || (ganho === melhorLargada.ganho && item.pos < melhorLargada.posVolta1)) {
+                    if (officialPilotUids.has(getPilotUid(item.piloto)) && ganho > 0 && (!melhorLargada || ganho > melhorLargada.ganho || (ganho === melhorLargada.ganho && item.pos < melhorLargada.posVolta1))) {
                         melhorLargada = {
                             piloto: item.piloto,
                             ganho,
@@ -5304,7 +5315,7 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
 
     // Fonte canônica das ultrapassagens: inversões relativas entre cada par de
     // snapshots, começando uma única vez em Grid -> V1.
-    const gridOrder = dashboardOrdenarResultado(classificacao).map((piloto, index) => ({
+    const gridOrder = dashboardOrdenarGeral(classificacao).map((piloto, index) => ({
         ...piloto, positionOverall: index + 1
     }));
     const lapOrders = [...ordemPorVolta.values()].map(ordem => ordem.map(item => ({
@@ -5327,15 +5338,8 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
 
     const official = values => [...values].filter(v => officialPilotUids.has(getPilotUid(v.piloto)));
     const topUltrapassagens = official(ultrapassagens.values()).sort((a, b) => b.total - a.total || dashboardNomePiloto(a.piloto).localeCompare(dashboardNomePiloto(b.piloto)))[0] || null;
-    const topLideradas = official(lideradas.values()).sort((a, b) => b.total - a.total || dashboardNomePiloto(a.piloto).localeCompare(dashboardNomePiloto(b.piloto)))[0] || null;
-    const topRegularidade = official(regularidade.values()).filter(v => Number.isFinite(v.desvio)).sort((a, b) => a.desvio - b.desvio)[0] || null;
-    if (melhorLargada && !officialPilotUids.has(getPilotUid(melhorLargada.piloto))) {
-        melhorLargada = official(ultrapassagens.values()).map(v => {
-            const first = ordemPorVolta.get(1)?.find(x => x.key === dashboardPilotoKey(v.piloto));
-            const gridPosition = grid.get(dashboardPilotoKey(v.piloto));
-            return first && gridPosition ? { piloto: v.piloto, ganho: gridPosition - first.pos, grid: gridPosition, posVolta1: first.pos } : null;
-        }).filter(Boolean).sort((a, b) => b.ganho - a.ganho)[0] || null;
-    }
+    const topLideradas = official(lideradas.values()).filter(v => v.total > 0).sort((a, b) => b.total - a.total || dashboardNomePiloto(a.piloto).localeCompare(dashboardNomePiloto(b.piloto)))[0] || null;
+    const topRegularidade = official(regularidade.values()).filter(v => Number.isFinite(v.desvio) && v.desvio >= 0 && v.status === "ok" && v.limpas >= KartAnalytics.MIN_CLEAN_LAPS).sort((a, b) => a.desvio - b.desvio)[0] || null;
 
     return {
         regularidade,
@@ -5350,10 +5354,13 @@ function dashboardMetricasVoltaAVolta(voltas, classificacao, officialPilotUids =
 }
 
 function dashboardEstatisticasEtapa(etapa) {
-    const corrida = dashboardOrdenarResultado(etapa.corrida);
-    const classificacao = dashboardOrdenarResultado(etapa.classificacao);
-    const vencedor = corrida[0] || null;
-    const pole = classificacao[0] || null;
+    const corrida = dashboardOrdenarGeral(etapa.corrida);
+    const classificacao = dashboardOrdenarGeral(etapa.classificacao);
+    const officialPilotUids = etapa.officialPilotUids instanceof Set ? etapa.officialPilotUids : new Set(etapa.officialPilotUids || []);
+    const officialCandidates = KartAnalytics.getOfficialHighlightCandidates({ analytics: corrida, officialPilotUids });
+    const officialQualifying = KartAnalytics.getOfficialHighlightCandidates({ analytics: classificacao, officialPilotUids });
+    const vencedor = officialCandidates[0] || null;
+    const pole = officialQualifying[0] || null;
 
     const candidatosMelhorVolta = [];
     if (etapa.voltas?.length) {
@@ -5371,7 +5378,6 @@ function dashboardEstatisticasEtapa(etapa) {
         .filter(v => Number.isFinite(v.tempo) && v.tempo > 0)
         .sort((a, b) => a.tempo - b.tempo));
 
-    const officialPilotUids = new Set(corrida.map(getPilotUid).filter(Boolean));
     const melhorVolta = candidatosMelhorVolta.find(v => officialPilotUids.has(getPilotUid(v.piloto))) || null;
     const metricas = dashboardMetricasVoltaAVolta(etapa.voltas, classificacao, officialPilotUids);
     const vencedorKey = dashboardPilotoKey(vencedor);
@@ -5388,9 +5394,10 @@ function dashboardEstatisticasEtapa(etapa) {
 
     return {
         etapa,
+        officialPilotUids,
         corrida,
         classificacao,
-        podium: corrida.slice(0, 3),
+        podium: officialCandidates.slice(0, 3),
         vencedor,
         pole,
         melhorVolta,
@@ -5466,15 +5473,13 @@ async function carregarDashboardCampeonato(campeonatoDocId, force = false) {
             corridaSnap,
             etapa.meta,
             ["resultadoFinalResumo.pilotosSelecionados", "resultado_final.pilotosSelecionados", "pilotos_resultado", "pilotosSelecionados", "pilotos"]
-        ).map(({ docId, data }) => ({ docId, ...data }))
-         .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId, pilotosCampeonato));
+        ).map(({ docId, data }) => ({ docId, ...data }));
 
         const classificacao = montarLinhasComFallbackResumoRankingFirestore(
             classificacaoSnap,
             etapa.meta,
             ["classificacaoResumo.pilotosSelecionados", "classificacao.pilotosSelecionados", "classificacao"]
-        ).map(({ docId, data }) => ({ docId, ...data }))
-         .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId, pilotosCampeonato));
+        ).map(({ docId, data }) => ({ docId, ...data }));
 
         const docsVoltaCandidatos = voltaDocs.filter(doc => dashboardDocumentoVoltaPertenceEtapa(doc, etapa));
         const ultimoImportado = String(etapa.meta.ultimoVoltaAVoltaImportado || etapa.meta.voltaAVoltaResumo?.idImportacao || "").trim();
@@ -5499,9 +5504,11 @@ async function carregarDashboardCampeonato(campeonatoDocId, force = false) {
             if (!conteudo) return;
             voltas.push(...extrairVoltaAVoltaHTMLTexto(conteudo, docsVoltaEtapa[idx]?.data?.nomeArquivo || docsVoltaEtapa[idx]?.id || "volta_a_volta.html"));
         });
-        voltas = voltas.filter(item => linhaPertenceAoCampeonatoRanking(item, "", pilotosCampeonato));
+        const officialPilotUids = new Set([...corrida, ...classificacao, ...voltas]
+            .filter(item => linhaPertenceAoCampeonatoRanking(item, item.docId || "", pilotosCampeonato))
+            .map(getPilotUid).filter(Boolean));
 
-        return { ...etapa, corrida, classificacao, voltas };
+        return { ...etapa, corrida, classificacao, voltas, officialPilotUids };
     }));
 
     const payload = {
@@ -5554,10 +5561,11 @@ function dashboardEstatisticasGeral(payload, ranking) {
             melhorVoltaAbsoluta = { ...stat.melhorVolta, etapa: stat.etapa };
         }
 
-        stat.metricas.ultrapassagens.forEach(item => dashboardSomarContador(ultrapassagens, item.piloto, "total", item.total));
-        stat.metricas.lideradas.forEach(item => dashboardSomarContador(lideradas, item.piloto, "total", item.total));
-        stat.metricas.regularidade.forEach(item => {
-            if (!Number.isFinite(item.desvio)) return;
+        const official = item => stat.officialPilotUids?.has(getPilotUid(item.piloto));
+        stat.metricas.ultrapassagens.filter(official).forEach(item => dashboardSomarContador(ultrapassagens, item.piloto, "total", item.total));
+        stat.metricas.lideradas.filter(official).forEach(item => dashboardSomarContador(lideradas, item.piloto, "total", item.total));
+        stat.metricas.regularidade.filter(official).forEach(item => {
+            if (!Number.isFinite(item.desvio) || item.desvio < 0 || item.status !== "ok" || item.limpas < KartAnalytics.MIN_CLEAN_LAPS) return;
             const key = dashboardPilotoKey(item.piloto);
             if (!regularidade.has(key)) regularidade.set(key, { piloto: item.piloto, valores: [] });
             regularidade.get(key).valores.push(item.desvio);
@@ -5591,7 +5599,7 @@ function dashboardEstatisticasGeral(payload, ranking) {
         topMvs: dashboardTopContador(mvs),
         topPodios: dashboardTopContador(podios),
         topUltrapassagens: dashboardTopContador(ultrapassagens),
-        topLideradas: dashboardTopContador(lideradas),
+        topLideradas: [...lideradas.values()].filter(item => item.total > 0).sort((a, b) => b.total - a.total)[0] || null,
         topGrand: dashboardTopContador(grand),
         topHat: dashboardTopContador(hat),
         topRegularidade
@@ -5613,7 +5621,7 @@ function dashboardCard({ titulo, piloto = null, valor = "-", descricao = "", vaz
 
 function dashboardCardsEtapa(stat) {
     const m = stat.metricas;
-    const officialPilotUids = new Set((stat.corrida || []).map(getPilotUid).filter(Boolean));
+    const officialPilotUids = stat.officialPilotUids instanceof Set ? stat.officialPilotUids : new Set(stat.officialPilotUids || []);
     const officialHighlight = (candidate, type) => {
         const pilot = candidate?.piloto || candidate;
         if (!pilot || officialPilotUids.has(getPilotUid(pilot))) return candidate;
@@ -5668,14 +5676,14 @@ function dashboardCardsEtapa(stat) {
             titulo: "🏁 Melhor Largada",
             piloto: m.melhorLargada?.piloto,
             valor: m.melhorLargada ? `${m.melhorLargada.ganho >= 0 ? "+" : ""}${m.melhorLargada.ganho} posições` : "-",
-            descricao: m.melhorLargada ? `De ${m.melhorLargada.grid}º no grid para ${m.melhorLargada.posVolta1}º após a 1ª volta` : "Volta a volta ou classificação indisponível",
+            descricao: m.melhorLargada ? `De ${m.melhorLargada.grid}º no grid para ${m.melhorLargada.posVolta1}º após a 1ª volta` : "Nenhum piloto do campeonato ganhou posições na 1ª volta",
             vazio: !m.melhorLargada
         }),
         dashboardCard({
             titulo: "🏴 Liderou mais voltas",
             piloto: m.topLideradas?.piloto,
             valor: m.topLideradas ? `${m.topLideradas.total} voltas` : "-",
-            descricao: "Maior número de passagens em primeiro",
+            descricao: m.topLideradas ? "Maior número de passagens em primeiro" : "Nenhum piloto do campeonato liderou voltas nesta etapa",
             vazio: !m.topLideradas
         }),
         dashboardCard({
@@ -5729,14 +5737,14 @@ function dashboardCardsGeral(geral) {
             titulo: "🏁 Melhor Largada",
             piloto: geral.melhorLargada?.piloto,
             valor: geral.melhorLargada ? `${geral.melhorLargada.ganho >= 0 ? "+" : ""}${geral.melhorLargada.ganho} posições` : "-",
-            descricao: geral.melhorLargada ? `Melhor ganho em uma etapa · Etapa ${geral.melhorLargada.etapa.meta.etapa || "-"}` : "Sem dados suficientes",
+            descricao: geral.melhorLargada ? `Melhor ganho em uma etapa · Etapa ${geral.melhorLargada.etapa.meta.etapa || "-"}` : "Nenhum piloto do campeonato ganhou posições na 1ª volta",
             vazio: !geral.melhorLargada
         }),
         dashboardCard({
             titulo: "🏴 Liderou mais voltas",
             piloto: geral.topLideradas?.piloto,
             valor: geral.topLideradas ? `${geral.topLideradas.total} voltas` : "-",
-            descricao: "Total de voltas lideradas no campeonato",
+            descricao: geral.topLideradas ? "Total de voltas lideradas no campeonato" : "Nenhum piloto do campeonato liderou voltas no período",
             vazio: !geral.topLideradas
         }),
         dashboardCard({
@@ -6072,6 +6080,7 @@ function dashboardSerializarEstatisticasEtapa(stat, fontes = {}) {
         qtdPilotosCorrida: stat.corrida?.length || 0,
         qtdPilotosClassificacao: stat.classificacao?.length || 0,
         qtdVoltasAnalisadas: Number(m.totalVoltasLider || 0),
+        officialPilotUids: [...(stat.officialPilotUids || [])],
         corrida: (stat.corrida || []).map(dashboardPilotoPersistivel),
         classificacao: (stat.classificacao || []).map(dashboardPilotoPersistivel),
         podium: (stat.podium || []).map(dashboardPilotoPersistivel),
@@ -6086,7 +6095,7 @@ function dashboardSerializarEstatisticasEtapa(stat, fontes = {}) {
         metricas: {
             ultrapassagens: dashboardListaMapaPersistivel(m.ultrapassagens, ["total"]),
             lideradas: dashboardListaMapaPersistivel(m.lideradas, ["total"]),
-            regularidade: dashboardListaMapaPersistivel(m.regularidade, ["desvio", "limpas", "pace"]),
+            regularidade: dashboardListaMapaPersistivel(m.regularidade, ["desvio", "limpas", "pace", "status"]),
             melhorLargada: m.melhorLargada ? {
                 piloto: dashboardPilotoMetricaPersistivel(m.melhorLargada.piloto),
                 ganho: Number(m.melhorLargada.ganho || 0),
@@ -6103,9 +6112,9 @@ function dashboardSerializarEstatisticasEtapa(stat, fontes = {}) {
             } : null,
             topRegularidade: m.topRegularidade ? {
                 piloto: dashboardPilotoMetricaPersistivel(m.topRegularidade.piloto),
-                desvio: Number(m.topRegularidade.desvio || 0),
+                desvio: Number.isFinite(m.topRegularidade.desvio) ? m.topRegularidade.desvio : null,
                 limpas: Number(m.topRegularidade.limpas || 0),
-                pace: Number(m.topRegularidade.pace || 0)
+                pace: Number.isFinite(m.topRegularidade.pace) ? m.topRegularidade.pace : null
             } : null,
             totalVoltasLider: Number(m.totalVoltasLider || 0)
         }
@@ -6117,6 +6126,7 @@ function dashboardHidratarEstatisticasEtapa(meta, resumo, docId = "") {
     const m = r.metricas || {};
     return {
         persistido: !!r.versao,
+        officialPilotUids: new Set(r.officialPilotUids || []),
         etapa: { docId, meta: { ...(meta || {}), resultadoDocId: docId } },
         corrida: Array.isArray(r.corrida) ? r.corrida : [],
         classificacao: Array.isArray(r.classificacao) ? r.classificacao : [],
@@ -6238,7 +6248,7 @@ function dashboardSerializarGeral(geral, ranking, etapasStats) {
         topHat: geral.topHat || null,
         topRegularidade: geral.topRegularidade ? {
             piloto: dashboardPilotoMetricaPersistivel(geral.topRegularidade.piloto),
-            media: Number(geral.topRegularidade.media || 0),
+            media: Number.isFinite(geral.topRegularidade.media) ? geral.topRegularidade.media : null,
             valores: geral.topRegularidade.valores || []
         } : null
     });
@@ -6538,6 +6548,21 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     const pilotAnalytics = montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta);
     const officialPilotUids = new Set(pilotosLista.map(getPilotUid).filter(Boolean));
     const stageHighlights = KartAnalytics.buildStageHighlights(pilotAnalytics, officialPilotUids);
+    console.table(KartAnalytics.getOfficialHighlightCandidates({ analytics: pilotAnalytics, officialPilotUids }).map(p => ({
+        Nome: p.driver_name || p.nome || "",
+        pilot_uid: p.pilot_uid,
+        Official: true,
+        "Grid Overall": p.start?.gridPositionOverall ?? null,
+        "First Lap Overall": p.start?.firstLapPositionOverall ?? null,
+        "Delta Overall": p.start?.deltaOverall ?? null,
+        "First Lap Made": p.overtakes?.firstLapMadeOverall ?? null,
+        "First Lap Taken": p.overtakes?.firstLapTakenOverall ?? null,
+        "Overtakes Made Overall": p.overtakes?.madeOverall ?? null,
+        "Laps Led Overall": p.leadership?.lapsLedOverall ?? null,
+        Regularity: p.pace?.regularity ?? null,
+        "Best Lap": p.bestLap?.time ?? null,
+        "Qualifying Overall": p.qualifying?.positionOverall ?? null
+    })));
     const [participantesAntigos, voltasAntigas, pilotosAnalyticsAntigos] = await Promise.all([
         resultadoDocRef.collection("participantes_etapa").get(),
         resultadoDocRef.collection("voltas_processadas").get(),
