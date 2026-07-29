@@ -202,4 +202,28 @@ assert.equal(analytics.toNullableNumber(""), null);
 assert.equal(analytics.toNullableNumber("0"), 0);
 assert.equal(analytics.normalizePilotUid(" A "), "A");
 
+
+{
+    const snapshot = ids => ({ positions: ids.map((pilot_uid, index) => ({ pilot_uid, driver_name: pilot_uid, positionOverall: index + 1, isChampionship: !pilot_uid.startsWith("X") })) });
+    const firstLap = analytics.calculateRaceOvertakes({ snapshots: [snapshot(["A", "B", "C", "P", "D", "E", "F"]), snapshot(["P", "A", "B", "C", "D", "E", "F"])] });
+    assert.deepEqual(firstLap.get("P").firstLap, { made: 3, taken: 0, balance: 3 });
+    assert.deepEqual(firstLap.get("P").race, { made: 3, taken: 0, balance: 3 }, "GRID -> V1 entra uma vez no total");
+
+    const mixed = analytics.calculateRaceOvertakes({ snapshots: [snapshot(["A", "P", "B", "C"]), snapshot(["B", "P", "A", "C"])] });
+    assert.deepEqual(mixed.get("P").firstLap, { made: 1, taken: 1, balance: 0 });
+
+    const externals = analytics.calculateRaceOvertakes({ snapshots: [snapshot(["X1", "X2", "A", "P"]), snapshot(["P", "X1", "X2", "A"])] });
+    assert.equal(externals.get("P").race.made, 3, "externos contam como adversários");
+    assert.deepEqual(externals.raceTotals, { made: 3, taken: 3 });
+
+    const missing = analytics.calculateRaceOvertakes({ snapshots: [snapshot(["A", "P", "B"]), snapshot(["P", "B"])] });
+    assert.deepEqual(missing.get("P").race, { made: 0, taken: 0, balance: 0 }, "aparecimento/desaparecimento não inventa evento");
+
+    const twice = analytics.calculateRaceOvertakes({ snapshots: [snapshot(["A", "P"]), snapshot(["P", "A"]), snapshot(["A", "P"])] });
+    assert.deepEqual(twice.get("P").race, { made: 1, taken: 1, balance: 0 }, "repasses em transições diferentes são eventos distintos");
+    assert.deepEqual(analytics.calculateRaceOvertakes({ snapshots: [snapshot(["A", "P"]), snapshot(["P", "A"])] }).get("P").race,
+        analytics.calculateRaceOvertakes({ snapshots: [snapshot(["A", "P"]), snapshot(["P", "A"])] }).get("P").race,
+        "reprocessamento determinístico não acumula");
+}
+
 console.log("kart analytics: highlights/evolution passed; pilot index candidate count = 6");
