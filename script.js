@@ -5735,7 +5735,7 @@ function dashboardCardsGeral(geral) {
             titulo: "🚀 + Ultrapassagens",
             piloto: geral.topUltrapassagens?.piloto,
             valor: geral.topUltrapassagens ? `${geral.topUltrapassagens.total} ${geral.topUltrapassagens.total === 1 ? "ultrapassagem" : "ultrapassagens"}` : "-",
-            descricao: "Soma das ultrapassagens feitas nas etapas",
+            descricao: "Total de ultrapassagens feitas nas etapas",
             vazio: !geral.topUltrapassagens
         }),
         dashboardCard({
@@ -6552,6 +6552,8 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     pilotosLista.forEach(driver => FirestoreIntegrity.requireFirestoreId(getPilotUid(driver), "pilot_uid", { campeonatoId: meta?.campeonato_id, etapaId: meta?.resultadoDocId, driver: DriverIdentity.getDriverName(driver) }));
     // Todo o cálculo e a validação acontecem antes de qualquer exclusão.
     const analytics = KartAnalytics.processarVoltasEtapa(voltas || [], pilotosLista, meta?.classificationAll || stat?.classificacao || []);
+    const overtakeInvariant = KartAnalytics.assertOvertakeInvariant(analytics.ultrapassagensGeral, `etapa ${meta?.etapa || meta?.resultadoDocId || "-"}`);
+    const firstLapInvariant = KartAnalytics.assertOvertakeInvariant(analytics.firstLapChanges, `primeira volta da etapa ${meta?.etapa || meta?.resultadoDocId || "-"}`);
     const pilotAnalytics = montarAnalyticsPilotosEtapa(analytics, pilotosLista, stat, meta);
     const officialPilotUids = new Set(pilotosLista.map(getPilotUid).filter(Boolean));
     const stageHighlights = KartAnalytics.buildStageHighlights(pilotAnalytics, officialPilotUids);
@@ -6565,7 +6567,9 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         analyticsCount: normalizedAnalytics.length,
         matchedCount: officialAnalytics.length,
         missingAnalytics: [...officialPilotUids].filter(uid => !analyticsUids.has(uid)),
-        extraAnalytics: [...analyticsUids].filter(uid => !officialPilotUids.has(uid))
+        extraAnalytics: [...analyticsUids].filter(uid => !officialPilotUids.has(uid)),
+        overtakeInvariant,
+        firstLapInvariant
     });
     const positiveDeltaByPilot = new Map();
     (analytics.snapshots || []).forEach(snapshot => (snapshot.positions || []).forEach(row => {
@@ -6755,6 +6759,7 @@ async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeona
         stageAnalytics.push({
             etapa: Number((stage.data() || {}).etapa || 0),
             etapa_id: stage.id,
+            stageKey: (stage.data() || {}).stageKey || `${campeonatoDocId}|${Number((stage.data() || {}).etapa || 0)}|${(stage.data() || {}).dataCorrida || ""}`,
             analytics: analyticsSnap.docs.map(doc => ({ ...(doc.data() || {}), _documentId: doc.id }))
         });
     }
@@ -6769,10 +6774,13 @@ async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeona
     console.log({ officialCount: officialPilotUids.size, analyticsCount: normalized.length, matchedCount: matched.length,
         missingAnalytics: [...officialPilotUids].filter(uid => !analyticsUids.has(uid)),
         extraAnalytics: [...analyticsUids].filter(uid => !officialPilotUids.has(uid)) });
-    console.table(normalized.map(p => ({ pilot_uid: p.pilot_uid, name: p.name,
-        stage: p._stage || p.etapa || "-", firstLapMade: p.firstLapOvertakes.madeOverall,
-        totalMade: p.overtakes.madeOverall, totalTaken: p.overtakes.takenOverall,
-        balance: p.overtakes.balanceOverall, sumPositivePositionDelta: p.start.deltaOverall })));
+    console.table(normalized.filter(p => /LEONARDO\s+LEMES/i.test(p.name)).map(p => ({
+        etapa: p.etapa || "-", pilot_uid: p.pilot_uid, nome: p.name,
+        dashboardMade: p.overtakes.madeOverall, dashboardTaken: p.overtakes.takenOverall,
+        dashboardBalance: p.overtakes.balanceOverall, highlightMadeSource: p.overtakes.madeOverall,
+        firstLapMade: p.firstLapOvertakes.madeOverall, positionDeltaSum: p.start.deltaOverall,
+        storedMadeOverall: p.overtakes.madeOverall
+    })));
     console.log("Highlights", championshipHighlights);
     console.groupEnd();
 
@@ -6781,7 +6789,10 @@ async function recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeona
         piloto: pilot(championshipHighlights.bestLap), tempo: championshipHighlights.bestLap.race.bestLap,
         etapa: { docId: championshipHighlights.bestLap.etapa_id || "", meta: { etapa: championshipHighlights.bestLap._stage || championshipHighlights.bestLap.etapa || "" } }
     };
-    if (championshipHighlights.overtakes) geral.topUltrapassagens = { piloto: pilot(championshipHighlights.overtakes), total: championshipHighlights.overtakes.overtakes.madeOverall };
+    if (championshipHighlights.overtakes) {
+        const overtakes = KartAnalytics.getPilotStageOvertakes(championshipHighlights.overtakes);
+        geral.topUltrapassagens = { piloto: pilot(championshipHighlights.overtakes), total: overtakes.made, tomadas: overtakes.taken, saldo: overtakes.balance };
+    }
     if (championshipHighlights.start) geral.melhorLargada = {
         piloto: pilot(championshipHighlights.start), ganho: championshipHighlights.start.start.deltaOverall,
         grid: championshipHighlights.start.start.gridPositionOverall,

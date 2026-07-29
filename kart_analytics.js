@@ -4,7 +4,7 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    const VERSION = 12;
+    const VERSION = 13;
     const MIN_CLEAN_LAPS = 2;
     const num = value => {
         if (value === null || value === undefined || value === "") return null;
@@ -19,11 +19,30 @@
         return num(pace?.regularity) >= 0 && num(pace?.cleanLaps) >= MIN_CLEAN_LAPS && !invalidStatuses.has(status);
     };
 
+    /** Canonical read adapter for the persisted per-stage overtake metric.
+     * Missing values remain missing: position delta is deliberately not a
+     * fallback, and first-lap overtakes are never added to the race total. */
+    function getPilotStageOvertakes(raw = {}, { warn = true } = {}) {
+        const made = num(pick(raw.overtakes?.madeOverall, raw.overtakesMadeOverall, raw.ultrapassagensFeitas));
+        const taken = num(pick(raw.overtakes?.takenOverall, raw.overtakesTakenOverall, raw.ultrapassagensTomadas));
+        const storedBalance = num(pick(raw.overtakes?.balanceOverall, raw.overtakesBalanceOverall, raw.saldoUltrapassagens));
+        if ((made === null || taken === null) && warn) console.warn("[Kart/Overtakes] analytics canônico ausente", {
+            pilot_uid: normalizePilotUid(pick(raw.pilot_uid, raw.pilotUid)),
+            etapa_id: raw.etapa_id || raw.stageKey || "", made, taken
+        });
+        const balance = made !== null && taken !== null ? made - taken : storedBalance;
+        if (made !== null && taken !== null && storedBalance !== null && storedBalance !== balance && warn) {
+            console.warn("[Kart/Overtakes] saldo persistido inconsistente", { pilot_uid: raw.pilot_uid, made, taken, storedBalance, balance });
+        }
+        return { made, taken, balance };
+    }
+
     /** Read-only transition adapter. It never calculates a metric and never
      * treats a Firestore document id as pilot_uid. */
     function normalizePilotAnalyticsForHighlights(raw = {}) {
         const pilot_uid = normalizePilotUid(pick(raw.pilot_uid, raw.pilotUid));
         const driver_name_display = pick(raw.driver_name_display, raw.name, raw.driver_name, raw.nome) || "";
+        const stageOvertakes = getPilotStageOvertakes(raw, { warn: false });
         return {
             ...raw,
             pilot_uid,
@@ -56,9 +75,9 @@
                 balanceOverall: num(pick(raw.firstLapOvertakes?.balanceOverall, raw.overtakes?.firstLapBalanceOverall, raw.firstLapBalanceOverall))
             },
             overtakes: {
-                madeOverall: num(pick(raw.overtakes?.madeOverall, raw.overtakesMadeOverall, raw.ultrapassagensFeitas)),
-                takenOverall: num(pick(raw.overtakes?.takenOverall, raw.overtakesTakenOverall, raw.ultrapassagensTomadas)),
-                balanceOverall: num(pick(raw.overtakes?.balanceOverall, raw.overtakesBalanceOverall, raw.saldoUltrapassagens))
+                madeOverall: stageOvertakes.made,
+                takenOverall: stageOvertakes.taken,
+                balanceOverall: stageOvertakes.balance
             },
             leadership: {
                 lapsLedOverall: num(pick(raw.leadership?.lapsLedOverall, raw.lapsLedOverall, raw.voltasLideradas)),
@@ -150,7 +169,7 @@
             hatTrick: candidates.find(overallHat) || null,
             bestLap: asc(p => num(p?.race?.bestLap) > 0 ? num(p.race.bestLap) : null),
             pole: candidates.find(p => num(p?.qualifying?.positionChampionship) === 1) || null,
-            overtakes: desc(p => num(p?.overtakes?.madeOverall), true),
+            overtakes: desc(p => getPilotStageOvertakes(p).made, true),
             start: desc(p => num(p?.start?.deltaOverall), true),
             leadership: desc(p => num(p?.leadership?.lapsLedOverall), true),
             regularity: asc(p => regularityIsValid(p?.pace) ? num(p.pace.regularity) : null)
@@ -159,15 +178,31 @@
     }
 
     function buildChampionshipHighlights(stageSummaries, officialPilotUids) {
-        const stages = (stageSummaries || []).flatMap((stage, index) =>
-            (stage?.allPilotAnalytics || stage?.analytics || []).map(row => ({ ...row, _stage: stage.etapa ?? stage.stage ?? index + 1 })));
+        const stageKeys = new Set();
+        const stages = (stageSummaries || []).flatMap((stage, index) => {
+            const stageKey = String(stage?.stageKey || stage?.etapa_id || stage?.etapa || stage?.stage || index + 1);
+            if (stageKeys.has(stageKey)) throw new Error(`[Kart/Highlights] etapa duplicada: ${stageKey}`);
+            stageKeys.add(stageKey);
+            const pilotKeys = new Set();
+            return (stage?.allPilotAnalytics || stage?.analytics || []).map(row => {
+                const uid = normalizePilotUid(row?.pilot_uid || row?.pilotUid);
+                const key = `${stageKey}|${uid}`;
+                if (!uid) throw new Error(`[Kart/Highlights] pilot_uid ausente na etapa ${stageKey}`);
+                if (pilotKeys.has(key)) throw new Error(`[Kart/Highlights] pilot analytics duplicado: ${key}`);
+                pilotKeys.add(key);
+                return { ...row, _stage: stage.etapa ?? stage.stage ?? index + 1, _stageKey: stageKey };
+            });
+        });
         const candidates = getOfficialHighlightCandidates({ analytics: stages, officialPilotUids });
         const byPilot = new Map();
         candidates.forEach(row => {
             const uid = String(identity.getPilotUid(row) || row.pilot_uid);
-            if (!byPilot.has(uid)) byPilot.set(uid, { ...row, pilot_uid: uid, driver_name_display: row.driver_name_display || row.name, overtakes: { ...row.overtakes, madeOverall: 0 }, leadership: { ...row.leadership, lapsLedOverall: 0 }, _regularities: [], stagesUsed: 0 });
+            if (!byPilot.has(uid)) byPilot.set(uid, { ...row, pilot_uid: uid, driver_name_display: row.driver_name_display || row.name, overtakes: { madeOverall: 0, takenOverall: 0, balanceOverall: 0 }, leadership: { ...row.leadership, lapsLedOverall: 0 }, _regularities: [], stagesUsed: 0 });
             const aggregate = byPilot.get(uid);
-            aggregate.overtakes.madeOverall += num(row.overtakes?.madeOverall) || 0;
+            const overtakes = getPilotStageOvertakes(row);
+            if (overtakes.made !== null) aggregate.overtakes.madeOverall += overtakes.made;
+            if (overtakes.taken !== null) aggregate.overtakes.takenOverall += overtakes.taken;
+            aggregate.overtakes.balanceOverall = aggregate.overtakes.madeOverall - aggregate.overtakes.takenOverall;
             aggregate.leadership.lapsLedOverall += num(row.leadership?.lapsLedOverall) || 0;
             if (regularityIsValid(row.pace)) {
                 aggregate._regularities.push(num(row.pace.regularity));
@@ -188,7 +223,12 @@
         highlights.pole = [...poles.values()].sort((a, b) => b.poleCount - a.poleCount)[0] || null;
         const positiveStarts = candidates.filter(row => num(row.start?.deltaOverall) > 0).sort((a, b) => num(b.start.deltaOverall) - num(a.start.deltaOverall));
         highlights.start = positiveStarts[0] || null;
-        return validateHighlights({ highlights, officialPilotUids, officialAnalytics: candidates });
+        const validated = validateHighlights({ highlights, officialPilotUids, officialAnalytics: candidates });
+        if (validated.overtakes) {
+            const total = byPilot.get(validated.overtakes.pilot_uid)?.overtakes?.madeOverall;
+            if (validated.overtakes.overtakes.madeOverall !== total) throw new Error("[Kart/Highlights] destaque de ultrapassagens diverge do total canônico");
+        }
+        return validated;
     }
 
     function championshipSnapshotRows(snapshot, officialPilotUids) {
@@ -376,5 +416,5 @@
             }
         };
     }
-    return { VERSION, MIN_CLEAN_LAPS, toNullableNumber: num, normalizePilotUid, normalizePilotAnalyticsForHighlights, regularityIsValid, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, calculatePositionChangesBetweenSnapshots, assertOvertakeInvariant, processarVoltasEtapa, consolidarPilotAnalytics, getOfficialHighlightCandidates, getOfficialMetricCandidates, validateHighlights, buildStageHighlights, buildChampionshipHighlights, championshipSnapshotRows };
+    return { VERSION, MIN_CLEAN_LAPS, toNullableNumber: num, normalizePilotUid, getPilotStageOvertakes, normalizePilotAnalyticsForHighlights, regularityIsValid, calcularRegularidade, gerarSnapshots, filtrarSnapshot, calcularUltrapassagens, calculatePositionChangesBetweenSnapshots, assertOvertakeInvariant, processarVoltasEtapa, consolidarPilotAnalytics, getOfficialHighlightCandidates, getOfficialMetricCandidates, validateHighlights, buildStageHighlights, buildChampionshipHighlights, championshipSnapshotRows };
 }));
