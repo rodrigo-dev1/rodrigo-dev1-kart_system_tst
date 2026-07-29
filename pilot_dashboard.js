@@ -9,6 +9,7 @@
     const fmt = (value, suffix = "") => n(value) === null ? "N/D" : `${Number(value).toFixed(3)}${suffix}`;
     const present = value => value !== null && value !== undefined && value !== "";
     const position = value => n(value) !== null && n(value) > 0 ? `P${n(value)}` : "—";
+    const ordinal = value => n(value) !== null && n(value) > 0 ? `${n(value)}º` : "—";
     const signed = value => n(value) === null ? "—" : `${n(value) > 0 ? "+" : ""}${n(value)}`;
     const duration = value => {
         if (!present(value)) return "—";
@@ -86,12 +87,16 @@
         return rows.filter(r => (!camp || r.campeonato_id === camp) && (stage === "all" || !stage || r.etapa_id === stage)).sort((a, b) => Number(a.etapa) - Number(b.etapa));
     }
     function kpis(rows) {
-        const sum = fn => rows.filter(fn).length;
-        return [
-            ["🏁", "Corridas", rows.length], ["🏆", "Vitórias", sum(r => r.achievements?.win)],
-            ["🥇", "Pódios", sum(r => r.achievements?.podium)], ["⚡", "Poles", sum(r => r.achievements?.pole)],
-            ["📊", "Pontos", rows.reduce((s, r) => s + Number(r.result?.points || 0), 0)], ["🏅", "Títulos", 0]
-        ].map(([icon, label, value]) => `<div class="pilot-kpi"><span>${icon}</span><b>${value}</b><small>${label}</small></div>`).join("");
+        const summary = KartAnalytics.consolidarPilotAnalytics(rows).kpis;
+        const items = [
+            ["🏁", "Corridas", summary.races, "Etapas disputadas"],
+            ["🏆", "Vitórias", summary.wins.championship, `Geral: ${summary.wins.overall}`],
+            ["🥇", "Pódios", summary.podiums.championship, `Geral: ${summary.podiums.overall}`],
+            ["⚡", "Poles", summary.poles.championship, `Geral: ${summary.poles.overall}`],
+            ["📊", "Pontos", summary.points, "Total no campeonato"],
+            ["🏁", "Melhor Colocação", ordinal(summary.bestPosition.championship), `Geral: ${ordinal(summary.bestPosition.overall)}`]
+        ];
+        return items.map(([icon, label, value, detail]) => `<div class="pilot-kpi"><span class="pilot-kpi-icon" aria-hidden="true">${icon}</span><b>${value}</b><small>${label}</small><em>${detail}</em></div>`).join("");
     }
     function lineChart(rows, series, invert = false) {
         if (!rows.length) return `<div class="pilot-empty">Piloto não participou desta etapa</div>`;
@@ -125,7 +130,7 @@
     function radar(rows) {
         const labels = ["Regularidade", "Ritmo", "Largada", "Ultrapassagem", "Aproveitamento"], values = scores(rows), cx = 170, cy = 150, radius = 105;
         const point = (i, scale) => { const angle = -Math.PI / 2 + i * Math.PI * 2 / labels.length; return `${cx + Math.cos(angle) * radius * scale},${cy + Math.sin(angle) * radius * scale}`; };
-        return `<svg class="pilot-radar" viewBox="0 0 340 310">${[.25,.5,.75,1].map(s => `<polygon points="${labels.map((_,i)=>point(i,s)).join(" ")}" fill="none" stroke="#465063"/>`).join("")}<polygon points="${values.map((v,i)=>point(i,v/100)).join(" ")}" fill="rgba(255,75,75,.3)" stroke="#ff6b6b" stroke-width="3"/>${labels.map((label,i)=>{const [x,y]=point(i,1.18).split(',');return `<text x="${x}" y="${y}" text-anchor="middle">${label}</text>`}).join("")}</svg>`;
+        return `<p class="pilot-performance-help">Visão geral do piloto em 5 dimensões. <strong>Regularidade:</strong> constância dos tempos de volta. <strong>Ritmo:</strong> desempenho médio em relação ao grid. <strong>Largada:</strong> posições ganhas ou perdidas na 1ª volta. <strong>Ultrapassagem:</strong> desempenho nas disputas. <strong>Aproveitamento:</strong> percentual dos pontos possíveis conquistados.</p><svg class="pilot-radar" viewBox="0 0 340 310">${[.25,.5,.75,1].map(s => `<polygon points="${labels.map((_,i)=>point(i,s)).join(" ")}" fill="none" stroke="#465063"/>`).join("")}<polygon points="${values.map((v,i)=>point(i,v/100)).join(" ")}" fill="rgba(255,75,75,.3)" stroke="#ff6b6b" stroke-width="3"/>${labels.map((label,i)=>{const [x,y]=point(i,1.18).split(',');return `<text x="${x}" y="${y}" text-anchor="middle">${label}</text>`}).join("")}</svg>`;
     }
     const card = (title, body, cls = "") => `<section class="pilot-card ${cls}"><h3>${title}</h3>${body}</section>`;
     function resultsTable(rows) {
@@ -192,7 +197,8 @@
         const filtered = selectedData(rows), photo = pilot.foto || pilot.foto_url || "";
         const specificStage = el("pilotFilterStage")?.value && el("pilotFilterStage").value !== "all";
         const historical = `${card("📈 Evolução de Posições",lineChart(filtered,[{name:"Posição Final geral",color:"#ff6b6b",get:r=>r.result?.positionOverall},{name:"Largada geral",color:"#5ca8ff",get:r=>r.start?.gridPositionOverall},{name:"Melhor Volta geral",color:"#ffca5c",get:r=>r.bestLap?.rankOverall}],true),"pilot-wide")}${card("📊 Pontuação por Etapa",bars(filtered,r=>r.result?.points,r=>`Etapa ${r.etapa}: ${r.result?.points||0} pontos`))}${card("↔ Saldo de Ultrapassagens",bars(filtered,r=>stageOvertakes(r).balance,r=>{const o=stageOvertakes(r);return `Etapa ${r.etapa}\nFeitas: ${o.made??"N/D"}\nTomadas: ${o.taken??"N/D"}\nSaldo: ${signed(o.balance)}`}))}${card("🏁 Performance na Largada",bars(filtered,r=>r.start?.deltaOverall,r=>`Etapa ${r.etapa}: ${r.start?.deltaOverall??"N/D"}`))}${card("🎯 Perfil de Performance",radar(filtered))}${card("〽 Ritmo e Regularidade",lineChart(filtered,[{name:"Pace",color:"#36c98f",get:r=>r.pace?.pace},{name:"Pace - Regularidade",color:"#5ca8ff",get:r=>n(r.pace?.pace)-n(r.pace?.regularity)},{name:"Pace + Regularidade",color:"#8d75d8",get:r=>n(r.pace?.pace)+n(r.pace?.regularity)}]))}${card("⏱ Evolução da Melhor Volta",lineChart(filtered,[{name:"Ranking geral",color:"#ffca5c",get:r=>r.bestLap?.rankOverall}],true))}`;
-        target.innerHTML = `<div class="pilot-hero"><div class="pilot-avatar">${photo?`<img src="${esc(photo)}" alt="">`:esc(initials)}</div><div><span>DASHBOARD DO PILOTO</span><h2>${esc(DriverIdentity.getDriverDisplayName(pilot))}</h2><p>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text || "Campeonatos")} · ${filtered.length} etapa(s) disputada(s)</p></div></div><div class="pilot-kpis">${kpis(filtered)}</div><div class="pilot-grid">${card("📋 Resultados por Corrida",resultsTable(filtered),"pilot-wide")}${specificStage ? stageSummary(filtered[0]) + card("🎯 Perfil de Performance",radar(filtered)) : historical}${card("🏆 Distribuição de Pódios",podium(filtered))}${card("📅 Comparação por Campeonato",championshipComparison(rows))}${card("🏅 Conquistas",achievements(filtered),"pilot-wide")}${card("🏁 Campeonatos",`<div class="pilot-champ-card"><b>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text||"-")}</b><span>${filtered.reduce((s,r)=>s+Number(r.result?.points||0),0)} pontos · ${filtered.length} corridas · posição média ${fmt(avg(filtered.map(r=>r.result?.positionChampionship)))}</span><button onclick="show('dash')">Ver Campeonato</button></div>`,"pilot-wide")}</div>`;
+        const kpiHelp = "Valor principal: resultado considerando somente os pilotos do campeonato. Geral: resultado considerando todos os participantes da bateria.";
+        target.innerHTML = `<div class="pilot-hero"><div class="pilot-avatar">${photo?`<img src="${esc(photo)}" alt="">`:esc(initials)}</div><div><span>DASHBOARD DO PILOTO</span><h2>${esc(DriverIdentity.getDriverDisplayName(pilot))}</h2><p>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text || "Campeonatos")} · ${filtered.length} etapa(s) disputada(s)</p></div></div><div class="pilot-kpis-head"><strong>Desempenho no campeonato</strong><button type="button" class="pilot-kpis-help" title="${kpiHelp}" aria-label="${kpiHelp}">?</button></div><div class="pilot-kpis">${kpis(filtered)}</div><div class="pilot-grid">${card("📋 Resultados por Corrida",resultsTable(filtered),"pilot-wide")}${specificStage ? stageSummary(filtered[0]) + card("🎯 Perfil de Performance",radar(filtered)) : historical}${card("🏆 Distribuição de Pódios",podium(filtered))}${card("📅 Comparação por Campeonato",championshipComparison(rows))}${card("🏅 Conquistas",achievements(filtered),"pilot-wide")}${card("🏁 Campeonatos",`<div class="pilot-champ-card"><b>${esc(el("pilotFilterChampionship")?.selectedOptions[0]?.text||"-")}</b><span>${filtered.reduce((s,r)=>s+Number(r.result?.points||0),0)} pontos · ${filtered.length} corridas · posição média ${fmt(avg(filtered.map(r=>r.result?.positionChampionship)))}</span><button onclick="show('dash')">Ver Campeonato</button></div>`,"pilot-wide")}</div>`;
     }
     async function filter() {
         const id = el("pilotFilterDriver")?.value, target = el("pilotDashboardContent");
@@ -206,6 +212,7 @@
     window.atualizarEtapasPiloto = updateStages;
     window.filtrarDashboardPiloto = filter;
     window.renderPilotStageSummary = stageSummary;
+    window.renderPilotKpis = kpis;
     window.abrirDetalhesPilotoEtapa = id => { el("pilotFilterStage").value = id; filter(); };
     window.openPilotDashboard = async ({ pilotUid: uid, campeonatoId, etapaId = null }) => {
         show("pilotosDashboard");

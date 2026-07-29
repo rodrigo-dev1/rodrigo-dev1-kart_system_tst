@@ -53,3 +53,16 @@ test("resumo diferencia perda, posição mantida e ausência de dados", () => {
     assert.match(html, /= 0 posições/);
     assert.doesNotMatch(html, /undefined|NaN|P0/);
 });
+
+test("KPIs priorizam campeonato e mostram o resultado geral", () => {
+    const html = context.window.renderPilotKpis([
+        analytics({ result: { positionOverall: 4, positionChampionship: 1, points: 20 }, qualifying: { positionOverall: 3, positionChampionship: 1 } }),
+        analytics({ result: { positionOverall: 2, positionChampionship: 2, points: 17 }, qualifying: { positionOverall: 4, positionChampionship: 1 } })
+    ]);
+    assert.match(html, /Vitórias[\s\S]*Geral: 0/);
+    assert.match(html, /Pódios[\s\S]*Geral: 1/);
+    assert.match(html, /Poles[\s\S]*Geral: 0/);
+    assert.match(html, /37[\s\S]*Pontos[\s\S]*Total no campeonato/);
+    assert.match(html, /1º[\s\S]*Melhor Colocação[\s\S]*Geral: 2º/);
+    assert.doesNotMatch(html, /Títulos/);
+});
