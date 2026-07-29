@@ -20,15 +20,13 @@
     }
 
     function normalizeDriverName(value) {
-        return String(value || "")
-            .replace(/^\s*\d+\s*-\s*/, "")
+        return cleanDriverDisplayName(value)
             .replace(/\[\s*[^\]]+\s*\]/g, " ")
-            .replace(/\s*-\s*RENTAL\s*$/i, "")
             .normalize("NFD")
             .replace(/[\u0300-\u036f]/g, "")
             .replace(/\s+/g, " ")
             .trim()
-            .toUpperCase();
+            .toLowerCase();
     }
 
     function getDriverName(item) {
@@ -88,8 +86,113 @@
     }
 
     function driverKey(item) {
+        const pilotUid = getPilotUid(item);
+        if (pilotUid) return `pilot:${pilotUid}`;
         const id = getDriverId(item);
         return id ? `id:${id}` : (normalizeDriverName(getDriverName(item)) ? `name:${normalizeDriverName(getDriverName(item))}` : "");
+    }
+
+    function getPilotUid(item) {
+        if (!item || typeof item !== "object") return "";
+        return String(item.pilot_uid || item.pilotUid || "").trim();
+    }
+
+    // Deterministic 64-bit hash represented by 16 hexadecimal characters. The
+    // namespace in the input (driver:/name:) is part of the digest and the kart
+    // number is deliberately never used.
+    function stableHash(value) {
+        const text = String(value || "");
+        let h1 = 0xdeadbeef ^ text.length, h2 = 0x41c6ce57 ^ text.length;
+        for (let i = 0; i < text.length; i += 1) {
+            const ch = text.charCodeAt(i);
+            h1 = Math.imul(h1 ^ ch, 2654435761);
+            h2 = Math.imul(h2 ^ ch, 1597334677);
+        }
+        h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+        h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+        return (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
+    }
+
+    function generatePilotUid({ driver_id, driverId, driver_name, name, normalized_name } = {}) {
+        const externalId = normalizeDriverId(driver_id || driverId);
+        const normalizedName = normalizeDriverName(normalized_name || driver_name || name);
+        if (!externalId && !normalizedName) throw new Error("Não é possível gerar pilot_uid sem driver_id ou nome");
+        return `p_${stableHash(externalId ? `driver:${externalId}` : `name:${normalizedName}`)}`;
+    }
+
+    function ensurePilotUid(item) {
+        const existing = getPilotUid(item);
+        if (existing) return existing;
+        return generatePilotUid({ ...item, driver_name: getDriverName(item) });
+    }
+
+    function findPilotByExternalId(identities, externalId) {
+        const id = normalizeDriverId(externalId);
+        if (!id) return null;
+        return (identities || []).find(identity => getDriverId(identity) === id || (identity.external_ids || []).map(normalizeDriverId).includes(id)) || null;
+    }
+
+    function findPilotByNormalizedName(identities, name) {
+        const normalized = normalizeDriverName(name);
+        return normalized ? (identities || []).filter(identity => normalizeDriverName(identity.normalized_name || getDriverName(identity)) === normalized) : [];
+    }
+
+    function mergePilotIdentity(identity, observation, now = new Date().toISOString()) {
+        const externalId = getDriverId(observation);
+        const originalName = getDriverName(observation);
+        const displayName = cleanDriverDisplayName(originalName) || identity.driver_name_display || "";
+        const aliases = [...new Set([...(identity.aliases || []), originalName, displayName].map(v => String(v || "").trim()).filter(Boolean))];
+        const externalIds = [...new Set([...(identity.external_ids || []), identity.driver_id, externalId].map(normalizeDriverId).filter(Boolean))];
+        return {
+            ...identity,
+            pilot_uid: ensurePilotUid(identity),
+            driver_id: normalizeDriverId(identity.driver_id) || externalId || null,
+            driver_name_display: identity.driver_name_display || displayName,
+            normalized_name: identity.normalized_name || normalizeDriverName(displayName),
+            aliases,
+            external_ids: externalIds,
+            createdAtISO: identity.createdAtISO || now,
+            updatedAtISO: now
+        };
+    }
+
+    function resolvePilotIdentity(observation, identities = [], options = {}) {
+        const externalId = getDriverId(observation);
+        const originalName = getDriverName(observation);
+        const normalizedName = normalizeDriverName(originalName);
+        let identity = findPilotByExternalId(identities, externalId);
+        let resolution = identity ? "external_id" : "";
+        if (!identity && normalizedName) {
+            const matches = findPilotByNormalizedName(identities, normalizedName);
+            if (matches.length === 1) { identity = matches[0]; resolution = "normalized_name"; }
+            else if (matches.length > 1) {
+                const warning = { code: "AMBIGUOUS_IDENTITY", message: "Identidade ambígua", normalized_name: normalizedName, candidates: matches.map(getPilotUid) };
+                if (typeof options.onWarning === "function") options.onWarning(warning);
+                // Never merge ambiguous names. A new external ID can safely
+                // establish an independent identity; otherwise use a stable
+                // ambiguity namespace so processing remains idempotent.
+                const seed = externalId ? `driver:${externalId}` : `ambiguous:${normalizedName}:${options.disambiguator || "unknown"}`;
+                identity = { pilot_uid: `p_${stableHash(seed)}` };
+                resolution = "ambiguous_new";
+            }
+        }
+        if (!identity) {
+            identity = { pilot_uid: generatePilotUid({ driver_id: externalId, normalized_name: normalizedName }) };
+            resolution = "created";
+        }
+        const merged = mergePilotIdentity(identity, observation, options.now);
+        const normalized = {
+            ...observation,
+            pilot_uid: merged.pilot_uid,
+            driver_id: merged.driver_id || null,
+            id_piloto: merged.driver_id || null,
+            driver_name_original: originalName,
+            driver_name_display: cleanDriverDisplayName(originalName) || merged.driver_name_display,
+            driver_name: cleanDriverDisplayName(originalName) || merged.driver_name_display,
+            normalized_name: merged.normalized_name,
+            kart_numero: normalizeKartNumber(observation?.kart_numero || observation?.kart)
+        };
+        return { identity: merged, pilot: normalized, resolution };
     }
 
     function getStageChampionshipDrivers(resultRows, registeredDrivers = []) {
@@ -111,12 +214,18 @@
         });
         const byKey = new Map();
         rows.forEach(item => {
-            const key = driverKey(item);
-            if (key && !byKey.has(key)) byKey.set(key, item);
+            let normalized = item;
+            try {
+                const pilotUid = ensurePilotUid(item);
+                normalized = { ...item, pilot_uid: pilotUid, driver_id: getDriverId(item) || null };
+            } catch (_) { /* an empty legacy row is ignored below */ }
+            const key = driverKey(normalized);
+            if (key && !byKey.has(key)) byKey.set(key, normalized);
         });
         const drivers = [...byKey.values()];
         return {
             drivers,
+            uids: new Set(drivers.map(getPilotUid).filter(Boolean)),
             ids: new Set(drivers.map(getDriverId).filter(Boolean)),
             // O conjunto de nomes pode conter todos os oficiais; ele só é
             // consultado por isChampionshipDriver quando o item comparado não
@@ -180,7 +289,7 @@
                 byKartNumber.get(kartNumber).push(driver);
             }
         });
-        return { drivers: official.drivers, ids: official.ids, byDriverId, byNormalizedName: names, byKartNumber };
+        return { drivers: official.drivers, ids: official.ids, uids: official.uids, byDriverId, byNormalizedName: names, byKartNumber };
     }
 
     function resolveStageLapParticipant(participant, stageMap, persistedLinks = []) {
@@ -230,6 +339,8 @@
     }
 
     function isChampionshipDriver(item, official) {
+        const pilotUid = getPilotUid(item);
+        if (pilotUid && official?.uids) return official.uids.has(pilotUid);
         const id = getDriverId(item);
         if (id) return official?.ids?.has(id) || false;
         const name = normalizeDriverName(getDriverName(item));
@@ -288,5 +399,5 @@
         };
     }
 
-    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getDriverName, cleanDriverDisplayName, getDriverDisplayName, getDriverShortDisplayName, driverKey, getStageReferenceRows, getStageChampionshipDrivers, getOfficialStageDriverIds, filterStageQualifying, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, filterStageChampionshipDrivers, reconcileStageChampionshipDrivers, compareDriverIdSets, compareStageDriverIds };
+    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getPilotUid, getDriverName, cleanDriverDisplayName, getDriverDisplayName, getDriverShortDisplayName, driverKey, stableHash, generatePilotUid, ensurePilotUid, findPilotByExternalId, findPilotByNormalizedName, mergePilotIdentity, resolvePilotIdentity, getStageReferenceRows, getStageChampionshipDrivers, getOfficialStageDriverIds, filterStageQualifying, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, filterStageChampionshipDrivers, reconcileStageChampionshipDrivers, compareDriverIdSets, compareStageDriverIds };
 }));

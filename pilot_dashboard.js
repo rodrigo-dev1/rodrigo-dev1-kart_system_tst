@@ -7,6 +7,8 @@
     const esc = value => typeof htmlEscape === "function" ? htmlEscape(value) : String(value || "");
     const fmt = (value, suffix = "") => n(value) === null ? "N/D" : `${Number(value).toFixed(3)}${suffix}`;
     const driverId = item => DriverIdentity.getDriverId(item);
+    const pilotUid = item => DriverIdentity.getPilotUid(item);
+    const pilotKey = item => pilotUid(item) || driverId(item);
 
     function pilotChampionships(pilot) {
         return typeof vinculosPiloto === "function" ? vinculosPiloto(pilot) : (pilot.campeonatos || []);
@@ -16,12 +18,12 @@
         if (!select) return;
         const selected = select.value;
         select.innerHTML = `<option value="">Selecione</option>` + DB.pilotos
-            .filter(p => driverId(p)).map(p => `<option value="${esc(driverId(p))}">${esc(DriverIdentity.getDriverDisplayName(p))}</option>`).join("");
+            .filter(p => pilotKey(p)).map(p => `<option value="${esc(pilotKey(p))}">${esc(DriverIdentity.getDriverDisplayName(p))}</option>`).join("");
         if ([...select.options].some(o => o.value === selected)) select.value = selected;
         updateChampionships();
     }
     function updateChampionships() {
-        const pilot = DB.pilotos.find(p => driverId(p) === el("pilotFilterDriver")?.value);
+        const pilot = DB.pilotos.find(p => pilotKey(p) === el("pilotFilterDriver")?.value);
         const linked = new Set(pilotChampionships(pilot || {}).flatMap(value => [String(value), normalizarDocId(value)]));
         const select = el("pilotFilterChampionship"), old = select?.value;
         if (!select) return;
@@ -41,7 +43,8 @@
     }
     async function queryPilotAnalytics(id) {
         if (cache.has(id)) return cache.get(id);
-        const snap = await firestore.collectionGroup("pilot_analytics").where("driver_id", "==", String(id)).get();
+        const isUid = String(id).startsWith("p_");
+        const snap = await firestore.collectionGroup("pilot_analytics").where(isUid ? "pilot_uid" : "driver_id", "==", String(id)).get();
         const rows = snap.docs.map(doc => ({ ...doc.data(), _path: doc.ref.path }));
         cache.set(id, rows);
         return rows;
@@ -110,7 +113,7 @@
         const id = el("pilotFilterDriver")?.value, target = el("pilotDashboardContent");
         if (!id) { target.innerHTML = `<div class="pilot-empty">Selecione um piloto</div>`; return; }
         target.innerHTML = `<div class="pilot-empty">Consultando analytics persistidos…</div>`;
-        try { const rows = await queryPilotAnalytics(id); render(rows, DB.pilotos.find(p => driverId(p) === id) || { driver_id:id, driver_name:id }); }
+        try { const rows = await queryPilotAnalytics(id); render(rows, DB.pilotos.find(p => pilotKey(p) === id) || { pilot_uid:id, driver_name:id }); }
         catch (error) { console.error(error); target.innerHTML = `<div class="pilot-empty">Etapa ainda não reprocessada</div>`; }
     }
     window.inicializarPilotosDashboard = populatePilots;
