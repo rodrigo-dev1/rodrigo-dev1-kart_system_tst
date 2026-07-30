@@ -6334,6 +6334,49 @@ async function dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVo
     return { voltas: [], fonte: { idImportacao: "", nomeArquivo: "", origem: "ausente" } };
 }
 
+// O usuário seleciona somente os pilotos oficiais ao importar a tomada, mas o
+// arquivo bruto contém o grid inteiro. Ultrapassagens precisam desse grid
+// completo; reconstruí-lo do backup evita que externos desapareçam do estado
+// GRID e que uma inversão observável seja perdida.
+function dashboardExtrairGridCompletoHTML(conteudo = "") {
+    const doc = new DOMParser().parseFromString(String(conteudo || ""), "text/html");
+    const table = doc.querySelector("table");
+    if (!table) return [];
+    const rows = [...table.querySelectorAll("tr")];
+    const headerIndex = rows.findIndex(row => [...row.querySelectorAll("th,td")].some(cell => cell.textContent.trim() === "Pos"));
+    if (headerIndex < 0) return [];
+    const headers = [...rows[headerIndex].querySelectorAll("th,td")].map(cell => cell.textContent.trim());
+    const positionIndex = headers.indexOf("Pos");
+    const kartIndex = headers.indexOf("No.");
+    const nameIndex = headers.indexOf("Nome");
+    if (positionIndex < 0 || nameIndex < 0) return [];
+    return rows.slice(headerIndex + 1).map(row => {
+        const cells = [...row.querySelectorAll("td")].map(cell => cell.textContent.replace(/\s+/g, " ").trim());
+        const position = Number.parseInt(cells[positionIndex], 10);
+        if (!Number.isFinite(position) || !cells[nameIndex]) return null;
+        const match = cells[nameIndex].match(/^\[(\d+)\]\s*(.*)$/);
+        return {
+            driver_id: match?.[1] || "",
+            driver_name: (match?.[2] || cells[nameIndex]).trim(),
+            kart_numero: kartIndex >= 0 ? cells[kartIndex] : "",
+            posicao_final: position,
+            posicao_geral_arquivo: position,
+            source: "classificacao_backup"
+        };
+    }).filter(Boolean).sort((a, b) => a.posicao_geral_arquivo - b.posicao_geral_arquivo);
+}
+
+async function dashboardBuscarGridCompletoEtapa(meta, classificacaoFallback = []) {
+    const importId = String(meta?.classificacaoResumo?.idImportacao || "").trim();
+    if (!importId) return classificacaoFallback;
+    const backup = await firestore.collection(COLLECTION_BACKUPS).doc(importId).get();
+    if (!backup.exists) return classificacaoFallback;
+    const rows = dashboardExtrairGridCompletoHTML(backup.data()?.conteudo || "");
+    if (!rows.length) throw new Error(`[Kart/Overtakes] classificação bruta sem grid válido: ${importId}`);
+    console.log("[Kart/Overtakes/GridSource]", { importId, participants: rows.length, source: backup.ref.path });
+    return rows;
+}
+
 async function dashboardLimparLinhasFantasmaVoltaAVolta(resultadoDocRef) {
     const snap = await resultadoDocRef.collection("pilotos_resultado").get();
     const fantasmas = snap.docs.filter(doc => linhaResultadoEhFantasmaVoltaAVolta(doc.data() || {}));
@@ -6408,7 +6451,8 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         ...row, posicao_geral_arquivo: row.positionOverall
     }));
     StageIntegrity.validateScoringBeforePersist(corrida, PONTOS_PADRAO);
-    const classificacaoResolvida = await resolverPersistirIdentidades(classificacaoFallback, corridaResolvida.identities, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "classificacao" });
+    const classificacaoCompletaRaw = await dashboardBuscarGridCompletoEtapa(meta, classificacaoFallback);
+    const classificacaoResolvida = await resolverPersistirIdentidades(classificacaoCompletaRaw, corridaResolvida.identities, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "classificacao" });
     const oficiaisEtapa = DriverIdentity.getOfficialStageDriverIds(corrida, pilotosCadastrados.pilotos);
     const pilotosCampeonato = {
         pilotos: oficiaisEtapa.drivers,
