@@ -2,7 +2,8 @@ const assert = require("node:assert/strict");
 global.DriverIdentity = require("../driver_identity.js");
 const analytics = require("../kart_analytics.js");
 
-assert.equal(analytics.VERSION, 17, "mudança do contrato de snapshots/ultrapassagens invalida analytics antigos");
+assert.equal(analytics.VERSION, 18, "grid completo e ledger de ultrapassagens invalidam analytics antigos");
+assert.deepEqual(analytics.getPilotStageOvertakes({ analyticsVersion: 18, ultrapassagensFeitas: 9, ultrapassagensTomadas: 2 }, { warn: false }), { made: null, taken: null, balance: null }, "analytics atual não aceita fallback legado");
 
 {
     assert.deepEqual(analytics.getPilotStageOvertakes({
@@ -250,10 +251,12 @@ assert.equal(analytics.normalizePilotUid(" A "), "A");
     assert.deepEqual(julio.race, { made: 5, taken: 0, balance: 5 });
     assert.ok(julio.race.made >= julio.firstLap.made);
     assert.ok(julio.race.taken >= julio.firstLap.taken);
-    assert.deepEqual(julio.transitionBreakdown, [
-        { from: "GRID", to: "V1", transition: "GRID -> V1", made: 3, taken: 0, balance: 3 },
-        { from: "V1", to: "V2", transition: "V1 -> V2", made: 2, taken: 0, balance: 2 }
+    assert.deepEqual(julio.transitionBreakdown.map(({ transition, madeCount, takenCount, balance }) => ({ transition, madeCount, takenCount, balance })), [
+        { transition: "GRID -> V1", madeCount: 3, takenCount: 0, balance: 3 },
+        { transition: "V1 -> V2", madeCount: 2, takenCount: 0, balance: 2 }
     ]);
+    assert.deepEqual(julio.transitionBreakdown[0].made.map(event => event.overtakenName), ["D", "E", "F"]);
+    assert.deepEqual(processed.raceOvertakes.overtakeEvents.filter(event => event.overtakerUid === "JULIO").map(event => event.transition), ["GRID->V1", "GRID->V1", "GRID->V1", "V1->V2", "V1->V2"]);
     assert.deepEqual(processed.raceOvertakes.raceTotals, { made: 5, taken: 5 });
 }
 

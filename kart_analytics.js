@@ -4,9 +4,9 @@
     root.KartAnalytics = api;
 }(typeof globalThis !== "undefined" ? globalThis : this, function () {
     "use strict";
-    // v17: snapshots de largada e ultrapassagens pairwise são um contrato de
-    // persistência novo. Documentos de versões anteriores não são compatíveis.
-    const VERSION = 17;
+    // v18: o ledger pairwise exige o grid completo (inclusive externos).
+    // Documentos anteriores podiam comparar a volta 1 com um grid parcial.
+    const VERSION = 18;
     const MIN_CLEAN_LAPS = 2;
     const num = value => {
         if (value === null || value === undefined || value === "") return null;
@@ -25,9 +25,10 @@
      * Missing values remain missing: position delta is deliberately not a
      * fallback, and first-lap overtakes are never added to the race total. */
     function getPilotStageOvertakes(raw = {}, { warn = true } = {}) {
-        const made = num(pick(raw.overtakes?.madeOverall, raw.overtakesMadeOverall, raw.ultrapassagensFeitas));
-        const taken = num(pick(raw.overtakes?.takenOverall, raw.overtakesTakenOverall, raw.ultrapassagensTomadas));
-        const storedBalance = num(pick(raw.overtakes?.balanceOverall, raw.overtakesBalanceOverall, raw.saldoUltrapassagens));
+        const current = num(raw.analyticsVersion) >= VERSION;
+        const made = num(current ? raw.overtakes?.madeOverall : pick(raw.overtakes?.madeOverall, raw.overtakesMadeOverall, raw.ultrapassagensFeitas));
+        const taken = num(current ? raw.overtakes?.takenOverall : pick(raw.overtakes?.takenOverall, raw.overtakesTakenOverall, raw.ultrapassagensTomadas));
+        const storedBalance = num(current ? raw.overtakes?.balanceOverall : pick(raw.overtakes?.balanceOverall, raw.overtakesBalanceOverall, raw.saldoUltrapassagens));
         if ((made === null || taken === null) && warn) console.warn("[Kart/Overtakes] analytics canônico ausente", {
             pilot_uid: normalizePilotUid(pick(raw.pilot_uid, raw.pilotUid)),
             etapa_id: raw.etapa_id || raw.stageKey || "", made, taken
@@ -354,6 +355,7 @@
         const currentById = new Map(current.map(row => [overtakeKey(row), row]));
         const comparableIds = previous.map(overtakeKey).filter(id => currentById.has(id));
         const result = new Map();
+        const events = [];
         const ensure = id => {
             if (!result.has(id)) {
                 const row = currentById.get(id) || previousById.get(id) || {};
@@ -375,6 +377,17 @@
                 const winner = ensure(aIsAhead ? aId : bId), loser = ensure(aIsAhead ? bId : aId);
                 winner.made += 1;
                 loser.taken += 1;
+                const overtakerUid = aIsAhead ? aId : bId;
+                const overtakenUid = aIsAhead ? bId : aId;
+                events.push({
+                    transition: context.transition || null,
+                    lap: num(context.lap),
+                    overtakerUid,
+                    overtakenUid,
+                    overtakerName: identity.getDriverDisplayName(currentById.get(overtakerUid) || previousById.get(overtakerUid)),
+                    overtakenName: identity.getDriverDisplayName(currentById.get(overtakenUid) || previousById.get(overtakenUid)),
+                    type: "position_inversion"
+                });
             }
         }
         result.forEach(row => { row.balance = row.made - row.taken; });
@@ -388,7 +401,7 @@
             });
             throw new Error(`[Kart/Overtakes] transição inconsistente: made=${totalMade}, taken=${totalTaken}`);
         }
-        return { byPilot: result, totalMade, totalTaken, comparableComplete: comparableIds.length === previous.length && comparableIds.length === current.length };
+        return { byPilot: result, events, totalMade, totalTaken, comparableComplete: comparableIds.length === previous.length && comparableIds.length === current.length };
     }
 
     /** Single source for first-lap and full-race overtakes. GRID -> V1 is the
@@ -402,19 +415,28 @@
             result.set(id, { ...row, firstLap: { made: 0, taken: 0, balance: 0 }, race: { made: 0, taken: 0, balance: 0 }, transitionBreakdown: [] });
         });
         for (let transitionIndex = 1; transitionIndex < snapshots.length; transitionIndex += 1) {
-            const transition = calculateOvertakesBetweenSnapshots(snapshots[transitionIndex - 1], snapshots[transitionIndex], { stageId, transitionIndex });
+            const previousSnapshot = snapshots[transitionIndex - 1] || {};
+            const currentSnapshot = snapshots[transitionIndex] || {};
+            const from = previousSnapshot.snapshotType === "grid"
+                ? "GRID"
+                : `V${num(previousSnapshot.numeroVolta ?? previousSnapshot.lap) ?? transitionIndex - 1}`;
+            const to = `V${num(currentSnapshot.numeroVolta ?? currentSnapshot.lap) ?? transitionIndex}`;
+            const transitionLabel = `${from}->${to}`;
+            const transition = calculateOvertakesBetweenSnapshots(previousSnapshot, currentSnapshot, {
+                stageId, transitionIndex, transition: transitionLabel,
+                lap: num(currentSnapshot.numeroVolta ?? currentSnapshot.lap) ?? transitionIndex
+            });
             transition.byPilot.forEach((change, id) => {
                 if (!result.has(id)) return;
                 const row = result.get(id);
                 row.race.made += change.made;
                 row.race.taken += change.taken;
-                const previousSnapshot = snapshots[transitionIndex - 1] || {};
-                const currentSnapshot = snapshots[transitionIndex] || {};
-                const from = previousSnapshot.snapshotType === "grid"
-                    ? "GRID"
-                    : `V${num(previousSnapshot.numeroVolta ?? previousSnapshot.lap) ?? transitionIndex - 1}`;
-                const to = `V${num(currentSnapshot.numeroVolta ?? currentSnapshot.lap) ?? transitionIndex}`;
-                row.transitionBreakdown.push({ from, to, transition: `${from} -> ${to}`, made: change.made, taken: change.taken, balance: change.balance });
+                row.transitionBreakdown.push({
+                    from, to, transition: `${from} -> ${to}`,
+                    made: transition.events.filter(event => event.overtakerUid === id),
+                    taken: transition.events.filter(event => event.overtakenUid === id),
+                    madeCount: change.made, takenCount: change.taken, balance: change.balance
+                });
                 if (transitionIndex === 1) row.firstLap = { made: change.made, taken: change.taken, balance: change.balance };
             });
         }
@@ -426,7 +448,8 @@
         });
         const raceTotals = assertOvertakeInvariant([...result.values()].map(row => ({ madeOverall: row.race.made, takenOverall: row.race.taken })), `etapa ${stageId || "-"}`);
         const firstLapTotals = assertOvertakeInvariant([...result.values()].map(row => ({ madeOverall: row.firstLap.made, takenOverall: row.firstLap.taken })), `primeira volta da etapa ${stageId || "-"}`);
-        return Object.assign(result, { raceTotals, firstLapTotals });
+        const overtakeEvents = [...result.values()].flatMap(row => row.transitionBreakdown.flatMap(item => item.made));
+        return Object.assign(result, { overtakeEvents, raceTotals, firstLapTotals });
     }
 
     function calcularUltrapassagens(snapshots, championshipOnly, participants = []) {
