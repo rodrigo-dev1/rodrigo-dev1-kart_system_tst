@@ -7,7 +7,15 @@
 
     const TYPES = Object.freeze({ qualifying: "classificacao", result: "resultado_final", laps: "volta_a_volta" });
     const text = value => String(value ?? "").trim();
-    const driverId = row => DriverIdentity.normalizeDriverId(row?.driver_id || row?.driverId || row?.id_piloto);
+    const driverId = row => {
+        const explicit = DriverIdentity.normalizeDriverId(row?.driver_id || row?.driverId || row?.id_piloto);
+        if (explicit) return explicit;
+        // Some pandas/browser parser combinations retain the bracketed code only
+        // in piloto_original. Identity must be recovered before display-name
+        // cleanup removes that token.
+        const original = text(row?.piloto_original || row?.driver_name || row?.nome || row?.piloto);
+        return DriverIdentity.normalizeDriverId(original.match(/\[\s*(\d+)\s*\]/)?.[1] || "");
+    };
     const kart = row => DriverIdentity.normalizeKartNumber(row?.kart_number || row?.kart_numero || row?.kart);
     const name = row => DriverIdentity.cleanDriverDisplayName(row?.driver_name || row?.nome || row?.piloto || row?.piloto_original);
     const normalizedName = row => DriverIdentity.normalizeDriverName(name(row)).toUpperCase();
@@ -193,5 +201,27 @@
         return documents;
     }
 
-    return { TYPES, seconds, formatLap, buildStageParticipants, validateStageFiles, processStage, createStageUid, createPersistenceManifest, estimateFirestoreDocumentSize, buildCanonicalSourceDocuments };
+    // Convert reconciled data back to the shapes consumed by the proven legacy
+    // savers. V2 owns orchestration only; Firestore readers keep one contract.
+    function buildLegacySavePayloads({ qualifying = [], result = [], laps = [], officialPilotUids = [], scoring = {}, poleBonus = 1, bestLapBonus = 1 }) {
+        const processed = processStage({ qualifying, result, laps, officialPilotUids, scoring, poleBonus, bestLapBonus });
+        const official = new Set(officialPilotUids);
+        const analytics = new Map(processed.analytics.map(row => [row.pilot_uid, row]));
+        const adapt = (participant, source) => {
+            const raw = participant.observations[source]?.[0];
+            if (!raw || !official.has(participant.pilot_uid)) return null;
+            const analytic = analytics.get(participant.pilot_uid);
+            const values = source === "qualifying" ? analytic.qualifying : analytic.race;
+            return { ...raw, pilot_uid: participant.pilot_uid, driver_id: participant.driver_id || "", id_piloto: participant.driver_id || "", driver_name: participant.display_name, kart_numero: participant.kart_number || raw.kart_numero || "", posicao_final: values.positionOverall, posicao_geral_arquivo: values.positionOverall, posicao_final2: values.positionChampionship, posCampeonato: values.positionChampionship, pontos: source === "result" ? analytic.scoring.base : analytic.scoring.bonusGrid, melhor_tempo: values.bestLapFormatted || raw.melhor_tempo || "", melhor_tempo_segundos: values.bestLap, melhor_tempo_ponto: source === "result" ? analytic.scoring.bonusBestLap : analytic.scoring.bonusGrid };
+        };
+        const voltaAVolta = processed.participants.filter(p => official.has(p.pilot_uid)).map(participant => {
+            const pilotLaps = participant.observations.laps || [];
+            const validTimes = pilotLaps.map(lap => seconds(lap.tempo_volta_segundos ?? lap.tempo_volta ?? lap.tempo)).filter(value => value !== null);
+            const best = validTimes.length ? Math.min(...validTimes) : null;
+            return { pilot_uid: participant.pilot_uid, driver_id: participant.driver_id || "", id_piloto: participant.driver_id || "", driver_name: participant.display_name, kart_numero: participant.kart_number || "", classe: pilotLaps[0]?.classe || "", voltas: pilotLaps.length, melhor_tempo_segundos: best, melhor_tempo: best === null ? "" : formatLap(best) };
+        });
+        return { classificacao: processed.participants.map(p => adapt(p, "qualifying")).filter(Boolean), resultado: processed.participants.map(p => adapt(p, "result")).filter(Boolean), voltaAVolta, processed };
+    }
+
+    return { TYPES, seconds, formatLap, buildStageParticipants, validateStageFiles, processStage, createStageUid, createPersistenceManifest, estimateFirestoreDocumentSize, buildCanonicalSourceDocuments, buildLegacySavePayloads };
 }));

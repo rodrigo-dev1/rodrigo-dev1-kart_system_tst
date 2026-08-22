@@ -167,42 +167,53 @@ async function importarEtapaV2() {
     const stageUid = StageImportV2.createStageUid(campeonato, dataCorrida, etapa);
     let sourcesPersisted = false;
     try {
-        if (status) status.textContent = "⏳ Persistindo fontes da etapa...";
-        const officialPilotUids = selected.map(p => p.pilot_uid);
-        const processed = StageImportV2.processStage({ ...STAGE_IMPORT_V2_STATE.files, officialPilotUids, scoring: PONTOS_PADRAO });
+        if (status) status.textContent = "⏳ Persistindo fontes da etapa pelo contrato legado...";
         const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
-        const resultId = getResultadoFinalDocId(etapa, dataCorrida), ref = campRef.collection("resultado_final").doc(resultId);
-        const now = new Date().toISOString();
+        const resultId = getResultadoFinalDocId(etapa, dataCorrida);
+        const ref = campRef.collection("resultado_final").doc(resultId);
+
+        // Identity is resolved for the complete 30-driver grid before the one-time
+        // official selection is projected onto each legacy payload.
+        const identityResolution = await resolverPersistirIdentidades(
+            STAGE_IMPORT_V2_STATE.built.participants.map(p => ({ pilot_uid: p.pilot_uid, driver_id: p.driver_id || "", driver_name: p.display_name, kart_numero: p.kart_number || "" })),
+            null, { campeonato_id: campeonatoDocId, etapa_id: resultId, fase: "stage_import_v2" }
+        );
+        const canonicalByUid = new Map(STAGE_IMPORT_V2_STATE.built.participants.map((p, index) => [p.pilot_uid, identityResolution.rows[index]]));
+        const officialPilotUids = selected.map(p => canonicalByUid.get(p.pilot_uid)?.pilot_uid || p.pilot_uid);
+        const files = Object.fromEntries(Object.entries(STAGE_IMPORT_V2_STATE.files).map(([source, rows]) => [source, rows.map(row => {
+            const participant = STAGE_IMPORT_V2_STATE.built.participants.find(p =>
+                (getDriverId(row) && p.driver_id === getDriverId(row)) ||
+                DriverIdentity.normalizeDriverName(p.display_name) === DriverIdentity.normalizeDriverName(DriverIdentity.getDriverName(row))
+            );
+            const canonical = participant && canonicalByUid.get(participant.pilot_uid);
+            return canonical ? { ...row, pilot_uid: canonical.pilot_uid, driver_id: canonical.driver_id || participant.driver_id || "", driver_name: canonical.driver_name || participant.display_name } : row;
+        })]));
+        const legacy = StageImportV2.buildLegacySavePayloads({ ...files, officialPilotUids, scoring: PONTOS_PADRAO });
         const manifest = StageImportV2.createPersistenceManifest(stageUid, STAGE_IMPORT_V2_STATE.names);
         const { sourceConfig, stageSources } = manifest;
-        const sourceDocuments = StageImportV2.buildCanonicalSourceDocuments({ ...STAGE_IMPORT_V2_STATE.files, officialPilotUids, stageImportId: stageUid, importIds: Object.fromEntries(Object.entries(sourceConfig).map(([key, value]) => [key, value.importId])) });
-        const officialPilots = selected.map(p => ({ pilot_uid: p.pilot_uid, driver_id: p.driver_id || null, driver_name: p.display_name || "" }));
-        // This write intentionally precedes every derived row and dashboard
-        // calculation. A refresh/reprocess can therefore never rediscover the
-        // official field from the complete result.
-        await ref.set(toFirestoreSafe({ campeonato, campeonato_id: campeonatoDocId, etapa, dataCorrida, stage_uid: stageUid, stageKey: StageIntegrity.createStageKey(campeonatoDocId, etapa, dataCorrida), stageImportVersion: 2, analyticsVersion: 2, officialPilotUids, officialPilots, stageSources, classificacaoResumo: { idImportacao: sourceConfig.qualifying.importId, nomeArquivo: STAGE_IMPORT_V2_STATE.names.qualifying }, resultadoFinalResumo: { idImportacao: sourceConfig.result.importId, nomeArquivo: STAGE_IMPORT_V2_STATE.names.result }, voltaAVoltaResumo: { idImportacao: sourceConfig.laps.importId, nomeArquivo: STAGE_IMPORT_V2_STATE.names.laps }, ultimoVoltaAVoltaImportado: sourceConfig.laps.importId, stageImport: { status: "processing", files: { qualifying: true, result: true, lapByLap: true }, startedAtISO: now }, dashboardOculto: true }), { merge: true });
-        const ops = [];
+        const now = new Date().toISOString();
+        const officialPilots = legacy.resultado.map(p => ({ pilot_uid: p.pilot_uid, driver_id: p.driver_id || null, driver_name: p.driver_name || "" }));
+
+        await ref.set(toFirestoreSafe({ campeonato, campeonato_id: campeonatoDocId, etapa, dataCorrida, stage_uid: stageUid, stageKey: StageIntegrity.createStageKey(campeonatoDocId, etapa, dataCorrida), stageImportVersion: 2, officialPilotUids, officialPilots, stageSources, stageImport: { status: "processing", files: { qualifying: true, result: true, lapByLap: true }, startedAtISO: now }, dashboardOculto: true }), { merge: true });
+
+        // Exactly the same global backup contract used by the old three actions.
         for (const [source, content] of Object.entries(STAGE_IMPORT_V2_STATE.contents)) {
             const config = sourceConfig[source];
-            ops.push({ tipo: "set", ref: firestore.collection(COLLECTION_BACKUPS).doc(config.importId), payload: { idImportacao: config.importId, stageImportId: stageUid, stageImportVersion: 2, campeonato, campeonato_id: campeonatoDocId, etapa, dataCorrida, tipoArquivo: config.tipoArquivo, tipoLabel: config.tipoLabel, sourceType: config.tipoArquivo, nomeArquivo: STAGE_IMPORT_V2_STATE.names[source], mimeType: STAGE_IMPORT_V2_STATE[source === "laps" ? "lapByLap" : source]?.file?.type || "text/html", conteudo: content, conteudoRaw: content, arquivoCompletoSalvoNoFirestore: true, dataUploadISO: now, criadoEmISO: now, stage_uid: stageUid, active: true } });
+            await salvarBackupImportacaoNoFirestore({ idImportacao: config.importId, stageImportId: stageUid, stageImportVersion: 2, campeonato, campeonato_id: campeonatoDocId, etapa, dataCorrida, tipoArquivo: config.tipoArquivo, tipoLabel: config.tipoLabel, nomeArquivo: STAGE_IMPORT_V2_STATE.names[source], mimeType: STAGE_IMPORT_V2_STATE[source === "laps" ? "lapByLap" : source]?.file?.type || "text/html", conteudo: content, conteudoRaw: content, arquivoCompletoSalvoNoFirestore: true, dataUploadISO: now, criadoEmISO: now, stage_uid: stageUid });
         }
-        processed.analytics.forEach(row => {
-            ops.push({ tipo: "set", ref: ref.collection("pilot_analytics").doc(row.pilot_uid), payload: { ...row, stage_uid: stageUid, analyticsVersion: 2 } });
-        });
-        Object.entries(sourceDocuments).forEach(([collection, rows]) => rows.forEach(row => ops.push({ tipo: "set", ref: ref.collection(collection).doc(row.pilot_uid), payload: toFirestoreSafe(row) })));
-        Object.entries(sourceDocuments).forEach(([collection, rows]) => console.info(`[Kart/FirestoreSize] Largest ${collection} doc: ${(Math.max(0, ...rows.map(StageImportV2.estimateFirestoreDocumentSize)) / 1024).toFixed(1)} KB`, { documents: rows.length }));
-        processed.participants.forEach(p => ops.push({ tipo: "set", ref: ref.collection("participantes_etapa").doc(p.pilot_uid), payload: { ...p, observations: null, stage_uid: stageUid } }));
-        await executarBatchFirestore(ops);
+
+        // Reuse the legacy savers instead of maintaining V2-only nested shapes.
+        await salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, cfg: TIPOS_ARQUIVO.find(c => c.tipo === "classificacao"), selecionados: legacy.classificacao, nomeArquivo: STAGE_IMPORT_V2_STATE.names.qualifying, backupId: sourceConfig.qualifying.importId });
+        await salvarSelecionadosNoFirestore({ campeonato, etapa, dataCorrida, cfg: TIPOS_ARQUIVO.find(c => c.tipo === "resultado_final"), selecionados: legacy.resultado, nomeArquivo: STAGE_IMPORT_V2_STATE.names.result, backupId: sourceConfig.result.importId });
+        const lapCfg = TIPOS_ARQUIVO.find(c => c.tipo === "volta_a_volta");
+        await salvarArquivoSemPreviewNoFirestore({ campeonato, etapa, dataCorrida, cfg: lapCfg, backupPayload: { conteudo: STAGE_IMPORT_V2_STATE.contents.laps, conteudoRaw: STAGE_IMPORT_V2_STATE.contents.laps, nomeArquivo: STAGE_IMPORT_V2_STATE.names.laps }, backupId: sourceConfig.laps.importId });
+        await salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, etapa, dataCorrida, selecionados: legacy.voltaAVolta, backupId: sourceConfig.laps.importId, nomeArquivo: STAGE_IMPORT_V2_STATE.names.laps });
         sourcesPersisted = true;
-        try {
-            await recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, atualizarGeral: true });
-        } catch (analyticsError) {
-            await ref.set({ stageImport: { status: "analytics_error", files: { qualifying: true, result: true, lapByLap: true }, message: String(analyticsError.message || analyticsError), failedAtISO: new Date().toISOString() }, dashboardOculto: true }, { merge: true });
-            throw analyticsError;
-        }
+
+        // No dashboard/reprocessing runs until all three legacy saves exist.
+        await recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, conteudoVoltaAtual: STAGE_IMPORT_V2_STATE.contents.laps, nomeArquivoVoltaAtual: STAGE_IMPORT_V2_STATE.names.laps, idImportacaoVoltaAtual: sourceConfig.laps.importId, atualizarGeral: true });
         await ref.set({ stageImport: { status: "complete", files: { qualifying: true, result: true, lapByLap: true }, completedAtISO: new Date().toISOString() }, dashboardOculto: false }, { merge: true });
         limparCacheDashboardCampeonato(campeonatoDocId);
-        console.log("[Kart/TalesTrace]", processed.analytics.find(p => p.driver_id === "233543") || { info: "trace genérico: Tales não participa desta etapa" });
         if (status) status.textContent = `✅ Etapa importada em operação única (${selected.length} oficiais).`;
         await inicializarRankingFirestore();
     } catch (error) {
