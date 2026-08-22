@@ -35,22 +35,49 @@ let IMPORTACAO_PYSCRIPT = [];
 let IMPORTACAO_PYSCRIPT_ARQUIVO = "";
 let IMPORTACAO_PYSCRIPT_TIPO = "";
 let IMPORTACAO_PREVIA_GERADA = false;
-let STAGE_IMPORT_V2_STATE = null;
+let STAGE_IMPORT_V2_STATE = {
+    qualifying: { file: null, parsed: null, error: null },
+    result: { file: null, parsed: null, error: null },
+    lapByLap: { file: null, parsed: null, error: null },
+    participants: [], validation: null
+};
+
+const STAGE_SOURCE_CONFIG = Object.freeze({
+    qualifying: { inputId: "imp_classificacao", type: "classificacao", label: "Tomada" },
+    result: { inputId: "imp_resultado", type: "resultado_final", label: "Resultado Final" },
+    laps: { inputId: "imp_voltas", type: "volta_a_volta", label: "Volta a volta" }
+});
+
+// O formulário V1 foi removido do HTML. Funções históricas permanecem apenas
+// para leitura de backups antigos e nunca são conectadas à tela Stage Import V2.
+const getLegacyImportInput = () => null;
+
+function detectStageSourceType(html) {
+    const text = new DOMParser().parseFromString(String(html || ""), "text/html").body?.textContent?.replace(/\s+/g, " ").toUpperCase() || "";
+    if (text.includes("TEMPOS DE VOLTA")) return "volta_a_volta";
+    if (/\bTOMADA\s*\d*\b/.test(text)) return "classificacao";
+    if (/\bPROVA\s*\d*\b/.test(text) && text.includes("RESULTADOS")) return "resultado_final";
+    return "desconhecido";
+}
 
 function parseStageTableV2(html, sourceType, sourceFile) {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const rows = [];
-    doc.querySelectorAll("tr").forEach(tr => {
+    const table = doc.querySelector("table.points") || doc.querySelector("table");
+    if (!table) throw new Error("Nenhuma tabela de resultados foi encontrada.");
+    const header = [...table.querySelectorAll("tr")].find(tr => tr.querySelectorAll("th").length);
+    const headings = [...(header?.querySelectorAll("th") || [])].map(th => String(th.textContent || "").replace(/\s+/g, " ").trim());
+    const column = (...names) => headings.findIndex(value => names.includes(value));
+    const indexes = { position: column("Pos"), kart: column("No."), name: column("Nome"), bestLap: column("Melhor Tempo") };
+    if (indexes.position < 0 || indexes.kart < 0 || indexes.name < 0) throw new Error("Colunas Pos, No. e Nome não foram encontradas.");
+    table.querySelectorAll("tr").forEach(tr => {
         const cells = [...tr.querySelectorAll("td")].map(td => String(td.textContent || "").replace(/\s+/g, " ").trim());
-        if (cells.length < 3) return;
-        const positionIndex = cells.findIndex(value => /^\d{1,2}$/.test(value));
-        const named = cells.map(value => ({ value, match: value.match(/^\[(\d+)\]\s*(.+)$/) })).find(item => item.match);
-        if (positionIndex < 0 || !named) return;
-        const kartValue = cells.find((value, index) => index !== positionIndex && /^\d{1,3}$/.test(value)) || "";
-        const lap = cells.find(value => /^\d{1,2}:\d{2}[.,]\d{3}$/.test(value) || /^\d{2}[.,]\d{3}$/.test(value)) || "";
+        const named = cells[indexes.name]?.match(/^\[(\d+)\]\s*(.+)$/);
+        if (!named || !/^\d+$/.test(cells[indexes.position] || "")) return;
+        const lap = indexes.bestLap >= 0 ? cells[indexes.bestLap] : "";
         rows.push({
-            positionOverall: Number(cells[positionIndex]), posicao_geral_arquivo: Number(cells[positionIndex]),
-            driver_id: named.match[1], driver_name: named.match[2], kart_numero: DriverIdentity.normalizeKartNumber(kartValue),
+            positionOverall: Number(cells[indexes.position]), posicao_geral_arquivo: Number(cells[indexes.position]),
+            driver_id: named[1], driver_name: named[2], kart_numero: DriverIdentity.normalizeKartNumber(cells[indexes.kart]),
             melhor_tempo: lap, melhor_tempo_segundos: StageImportV2.seconds(lap), sourceType, sourceFile, arquivo_origem: sourceFile
         });
     });
@@ -63,8 +90,11 @@ function renderStageParticipantsV2() {
     if (!state || !preview) return;
     const validation = state.validation;
     preview.innerHTML = `<h3>Validação da etapa</h3>
-        <p>${validation.valid ? "✅ Arquivos compatíveis" : "❌ Arquivos incompatíveis"} · ${state.files.qualifying.length} na tomada · ${state.files.result.length} no resultado · ${state.files.laps.length} voltas</p>
-        ${validation.errors.map(error => `<p class="error">❌ ${htmlEscape(error.code)} ${htmlEscape(error.field || error.source || "")}</p>`).join("")}
+        <p>${validation.valid ? "✅ Arquivos compatíveis" : "❌ Arquivos incompatíveis"}</p>
+        <p>${state.qualifying.error ? `❌ Tomada: erro ao processar arquivo — ${htmlEscape(state.qualifying.error)}` : `✅ Tomada: ${validation.qualifyingDrivers} pilotos`}<br>
+        ${state.result.error ? `❌ Resultado: erro ao processar arquivo — ${htmlEscape(state.result.error)}` : `✅ Resultado: ${validation.resultDrivers} pilotos`}<br>
+        ${state.lapByLap.error ? `❌ Volta a volta: erro ao processar arquivo — ${htmlEscape(state.lapByLap.error)}` : `✅ Volta a volta: ${validation.lapDrivers} pilotos / ${validation.lapRecords} voltas`}</p>
+        ${validation.errors.filter(error => error.code !== "MISSING_SOURCE").map(error => `<p class="error">❌ ${htmlEscape(error.code)} ${htmlEscape(error.field || error.source || "")}</p>`).join("")}
         <div class="dashboard-table-wrap"><table><thead><tr><th>Importar?</th><th>Piloto</th><th>ID</th><th>Kart</th><th>Tomada</th><th>Resultado</th><th>Volta a volta</th><th>Status</th></tr></thead><tbody>
         ${state.built.participants.map((p, index) => {
             const count = Object.values(p.sources).filter(Boolean).length;
@@ -77,26 +107,52 @@ function renderStageParticipantsV2() {
 
 async function analisarArquivosEtapaV2() {
     const status = document.getElementById("statusImport");
-    const inputs = { qualifying: document.getElementById("imp_classificacao"), result: document.getElementById("imp_resultado"), laps: document.getElementById("imp_voltas") };
-    if (Object.values(inputs).some(input => !input?.files?.[0])) return alert("Selecione os três arquivos da etapa.");
+    const pyStatus = document.getElementById("pyStatus");
+    const button = document.getElementById("btnAnalisarEtapa");
+    const inputs = Object.fromEntries(Object.entries(STAGE_SOURCE_CONFIG).map(([key, config]) => [key, document.getElementById(config.inputId)]));
+    for (const [key, config] of Object.entries(STAGE_SOURCE_CONFIG)) {
+        if (!inputs[key]?.files?.[0]) {
+            const message = `⚠️ Selecione o arquivo ${key === "qualifying" ? "de Tomada" : key === "result" ? "de Resultado Final" : "Volta a Volta"}`;
+            if (status) status.textContent = message;
+            return;
+        }
+    }
     try {
+        if (button) { button.disabled = true; button.textContent = "ANALISANDO..."; }
         if (status) status.textContent = "⏳ Analisando e reconciliando as três fontes...";
         const contents = Object.fromEntries(await Promise.all(Object.entries(inputs).map(async ([key, input]) => [key, await input.files[0].text()])));
-        const files = {
-            qualifying: parseStageTableV2(contents.qualifying, "classificacao", inputs.qualifying.files[0].name),
-            result: parseStageTableV2(contents.result, "resultado_final", inputs.result.files[0].name),
-            laps: extrairVoltaAVoltaHTMLTexto(contents.laps, inputs.laps.files[0].name)
-        };
+        const sourceStates = {};
+        await Promise.all(Object.entries(STAGE_SOURCE_CONFIG).map(async ([key, config]) => {
+            const file = inputs[key].files[0], detected = detectStageSourceType(contents[key]);
+            try {
+                if (detected !== config.type) throw new Error(`O arquivo selecionado em ${config.label} parece ser ${detected === "classificacao" ? "uma Tomada" : detected === "resultado_final" ? "um Resultado Final" : detected === "volta_a_volta" ? "um Volta a volta" : "de tipo desconhecido"}.`);
+                let parsed;
+                if (typeof window.parseStageFile === "function") {
+                    const payload = JSON.parse(String(await window.parseStageFile(contents[key], file.name, config.type)));
+                    parsed = payload.registros;
+                } else {
+                    parsed = key === "laps" ? extrairVoltaAVoltaHTMLTexto(contents[key], file.name) : parseStageTableV2(contents[key], config.type, file.name);
+                }
+                if (!parsed.length) throw new Error("O parser não identificou registros.");
+                sourceStates[key] = { file, parsed, error: null };
+            } catch (error) {
+                sourceStates[key] = { file, parsed: null, error: String(error.message || error) };
+            }
+        }));
+        const files = { qualifying: sourceStates.qualifying.parsed || [], result: sourceStates.result.parsed || [], laps: sourceStates.laps.parsed || [] };
         const built = StageImportV2.buildStageParticipants(files);
         const championship = getChampionshipDrivers(document.getElementById("imp_camp")?.value || "");
         built.participants.forEach(p => { p.suggestedOfficial = championship.ids.has(p.driver_id); });
         const validation = StageImportV2.validateStageFiles(files);
-        STAGE_IMPORT_V2_STATE = { files, contents, names: Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.files[0].name])), built, validation };
+        STAGE_IMPORT_V2_STATE = { qualifying: sourceStates.qualifying, result: sourceStates.result, lapByLap: sourceStates.laps, participants: built.participants, files, contents, names: Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.files[0].name])), built, validation };
         renderStageParticipantsV2();
+        if (pyStatus) pyStatus.innerHTML = `${sourceStates.qualifying.error ? "❌" : "✅"} Tomada: ${sourceStates.qualifying.error || `${validation.qualifyingDrivers} pilotos`}<br>${sourceStates.result.error ? "❌" : "✅"} Resultado: ${sourceStates.result.error || `${validation.resultDrivers} pilotos`}<br>${sourceStates.laps.error ? "❌" : "✅"} Volta a volta: ${sourceStates.laps.error || `${validation.lapDrivers} pilotos / ${validation.lapRecords} voltas`}`;
         if (status) status.textContent = validation.valid ? "✅ Análise concluída. Selecione os pilotos oficiais uma única vez." : "❌ Corrija os conflitos antes de importar.";
     } catch (error) {
         console.error("[Kart/StageImportV2]", error);
         if (status) status.textContent = `❌ ${error.message || error}`;
+    } finally {
+        if (button) { button.disabled = false; button.textContent = "ANALISAR OS 3 ARQUIVOS"; }
     }
 }
 window.analisarArquivosEtapaV2 = analisarArquivosEtapaV2;
@@ -497,7 +553,7 @@ function onTipoArquivoImportChange() {
 
     const cfg = getTipoArquivoSelecionado();
     const label = document.getElementById("labelFileImportacao");
-    const fileInput = document.getElementById("fileImportacaoUnico");
+    const fileInput = getLegacyImportInput();
     const pyStatus = document.getElementById("pyStatus");
 
     limparEstadoImportacao();
@@ -530,7 +586,7 @@ async function atualizarPreviewImportacaoAtual() {
     const cfg = getTipoArquivoSelecionado();
 
     if (cfg?.tipo === "volta_a_volta") {
-        const file = document.getElementById("fileImportacaoUnico")?.files?.[0];
+        const file = getLegacyImportInput()?.files?.[0];
 
         if (file) {
             await prepararPreviewVoltaAVoltaSelecionado(file);
@@ -1362,7 +1418,7 @@ async function prepararPreviewVoltaAVoltaSelecionado(fileArg = null) {
     const status = document.getElementById("statusImport");
     const pyStatus = document.getElementById("pyStatus");
     const campeonato = document.getElementById("imp_camp")?.value || "";
-    const file = fileArg || document.getElementById("fileImportacaoUnico")?.files?.[0];
+    const file = fileArg || getLegacyImportInput()?.files?.[0];
 
     if (cfg?.tipo !== "volta_a_volta" || !file) return;
 
@@ -1434,7 +1490,7 @@ async function prepararPreviewVoltaAVoltaPyScript(html, nomeArquivo = "arquivo.h
 }
 
 function inicializarPreviewVoltaAVoltaJS() {
-    const input = document.getElementById("fileImportacaoUnico");
+    const input = getLegacyImportInput();
     if (!input || input.dataset.voltaPreviewListener === "1") return;
 
     input.dataset.voltaPreviewListener = "1";
@@ -2499,7 +2555,7 @@ async function fazerBackupEProcessar() {
     const dataCorrida = document.getElementById("imp_data")?.value || "";
     const status = document.getElementById("statusImport");
     const cfg = getTipoArquivoSelecionado();
-    const file = document.getElementById("fileImportacaoUnico")?.files?.[0];
+    const file = getLegacyImportInput()?.files?.[0];
     const btn = event?.target;
     const textoOriginalBotao = btn?.innerText;
 
@@ -2590,7 +2646,7 @@ async function fazerBackupEProcessar() {
                 idImportacaoVoltaAtual: cfg.tipo === "volta_a_volta" ? idUnico : ""
             });
 
-            document.getElementById("fileImportacaoUnico").value = "";
+            if (getLegacyImportInput()) getLegacyImportInput().value = "";
             await inicializarRankingFirestore();
             return;
         }
@@ -3104,7 +3160,7 @@ async function confirmarImportacao() {
     const etapa = document.getElementById("imp_etapa")?.value || "";
     const data = document.getElementById("imp_data")?.value || "";
     const cfg = getTipoArquivoSelecionado();
-    const file = document.getElementById("fileImportacaoUnico")?.files?.[0];
+    const file = getLegacyImportInput()?.files?.[0];
     const status = document.getElementById("statusImport");
 
     if (!campeonato) return alert("Selecione o campeonato!");
@@ -7668,5 +7724,4 @@ function renderUltrapassagensChart(mode='campeonato') {
     const top=field=>[...items].sort((a,b)=>b[field]-a[field])[0], k=document.getElementById('overtakeKpis'); if(k&&items.length){const a=top('feitas'),b=top('tomadas'),c=top('saldo');k.innerHTML=`<div class="analytics-kpis"><span>Mais ultrapassou: <b>${htmlEscape(getDriverShortName(a))} — ${a.feitas}</b></span><span>Mais sofreu: <b>${htmlEscape(getDriverShortName(b))} — ${b.tomadas}</b></span><span>Melhor saldo: <b>${htmlEscape(getDriverShortName(c))} — ${c.saldo>=0?'+':''}${c.saldo}</b></span></div>`;}
 }
 
-inicializarPreviewVoltaAVoltaJS();
 fetchData();

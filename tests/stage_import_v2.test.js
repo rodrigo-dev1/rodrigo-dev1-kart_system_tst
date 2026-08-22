@@ -56,6 +56,34 @@ test("seleção única é aplicada às três fontes e processamento é idempoten
     assert.ok(first.participants.find(p => p.pilot_uid === tales.pilot_uid).sources.laps);
 });
 
+test("validação contabiliza pilotos e registros de volta sem confundir as grandezas", () => {
+    const validation = StageImportV2.validateStageFiles({ qualifying, result, laps });
+    assert.deepEqual({
+        compatible: validation.compatible,
+        qualifyingDrivers: validation.qualifyingDrivers,
+        resultDrivers: validation.resultDrivers,
+        lapDrivers: validation.lapDrivers,
+        lapRecords: validation.lapRecords,
+        conflicts: validation.conflicts
+    }, {
+        compatible: true,
+        qualifyingDrivers: 5,
+        resultDrivers: 5,
+        lapDrivers: 5,
+        lapRecords: 5,
+        conflicts: []
+    });
+    for (const id of ["233543", "41938"]) {
+        assert.deepEqual(built.participants.find(p => p.driver_id === id).sources, { qualifying: true, result: true, laps: true });
+    }
+});
+
+test("participante ausente em qualquer fonte torna o conjunto incompatível", () => {
+    const validation = StageImportV2.validateStageFiles({ qualifying, result, laps: laps.slice(1) });
+    assert.equal(validation.compatible, false);
+    assert.ok(validation.conflicts.some(error => error.code === "PARTICIPANT_SOURCE_MISMATCH"));
+});
+
 test("conflito de driver_id bloqueia a etapa", () => {
     const invalidResult = result.map(row => row.driver_id === "233543" ? { ...row, driver_id: "999999" } : row);
     const validation = StageImportV2.validateStageFiles({ qualifying, result: invalidResult, laps });
