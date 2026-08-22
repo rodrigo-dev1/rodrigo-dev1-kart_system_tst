@@ -150,3 +150,27 @@ test("persistência canônica distribui 441 voltas em 30 documentos determiníst
     assert.ok(Math.max(...docs.volta_a_volta_pilotos.map(StageImportV2.estimateFirestoreDocumentSize)) < 750 * 1024);
     assert.equal(new Set(docs.volta_a_volta_pilotos.map(doc => doc.pilot_uid)).size, 30);
 });
+
+test("recupera driver_id de piloto_original antes de reconciliar identidade", () => {
+    const files = {
+        qualifying: [{ piloto_original: "[233543] TALES MOLINA", driver_name: "TALES MOLINA", kart_numero: "029" }],
+        result: [{ driver_id: "233543", driver_name: "TALES MOLINA", kart_numero: "029" }],
+        laps: [{ driver_id: "233543", driver_name: "TALES MOLINA", kart_numero: "029", volta: 1 }]
+    };
+    const participant = StageImportV2.buildStageParticipants(files).participants[0];
+    assert.equal(participant.driver_id, "233543");
+    assert.deepEqual(participant.sources, { qualifying: true, result: true, laps: true });
+});
+
+test("adapter V2 restaura os payloads dos três savers legados", () => {
+    const lapRows = result.flatMap(row => [1, 2].map(volta => ({ ...row, volta, tempo_volta: volta === 1 ? "1:03.000" : "1:02.000" })));
+    const payloads = StageImportV2.buildLegacySavePayloads({ qualifying, result, laps: lapRows, officialPilotUids, scoring: { 1: 20, 2: 17, 3: 15, 4: 13, 5: 11 } });
+    assert.equal(payloads.classificacao.length, 5);
+    assert.equal(payloads.resultado.length, 5);
+    assert.equal(payloads.voltaAVolta.length, 5);
+    assert.equal(payloads.classificacao[0].driver_id, "233543");
+    assert.equal(payloads.classificacao[0].melhor_tempo, "1:02.961");
+    assert.equal(payloads.resultado.find(p => p.driver_id === "41938").pontos, 20);
+    assert.equal(payloads.voltaAVolta[0].voltas, 2);
+    assert.equal(payloads.voltaAVolta[0].melhor_tempo, "1:02.000");
+});
