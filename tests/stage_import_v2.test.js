@@ -90,3 +90,44 @@ test("conflito de driver_id bloqueia a etapa", () => {
     assert.equal(validation.valid, false);
     assert.ok(validation.errors.some(error => error.code === "DRIVER_ID_CONFLICT"));
 });
+
+test("preserva 30 participantes mas resultado e destaques contêm somente os 5 oficiais", () => {
+    const external = Array.from({ length: 25 }, (_, index) => ({
+        positionOverall: index === 0 ? 1 : index + 14,
+        driver_id: `ext-${index}`,
+        driver_name: index === 0 ? "GABRIEL FERREIRA" : `EXTERNO ${index}`,
+        kart_numero: String(100 + index),
+        melhor_tempo: index === 0 ? "1:00.500" : "1:04.000"
+    }));
+    const allResult = [...external, ...result].sort((a, b) => a.positionOverall - b.positionOverall);
+    const allQualifying = [
+        { ...external[0], positionOverall: 1, melhor_tempo: "1:00.000" },
+        ...external.slice(1).map((row, index) => ({ ...row, positionOverall: index + 2 })),
+        ...qualifying
+    ];
+    const allLaps = [...allResult].map(row => ({ driver_id: row.driver_id, driver_name: row.driver_name, kart_numero: row.kart_numero, volta: 1 }));
+    const allBuilt = StageImportV2.buildStageParticipants({ qualifying: allQualifying, result: allResult, laps: allLaps });
+    const selected = new Set(["233543", "41938", "231138", "3306", "51107"]);
+    const officialUids = allBuilt.participants.filter(p => selected.has(p.driver_id)).map(p => p.pilot_uid);
+    const stage = StageImportV2.processStage({ qualifying: allQualifying, result: allResult, laps: allLaps, officialPilotUids: officialUids });
+
+    assert.equal(stage.participants.length, 30);
+    assert.equal(stage.participants.filter(p => p.isChampionship).length, 5);
+    assert.equal(stage.participants.filter(p => !p.isChampionship).length, 25);
+    assert.equal(stage.result.length, 5);
+    assert.deepEqual(stage.result.map(p => p.driver_name), ["LEONARDO LEMES", "RODRIGO CRUZ", "CARLOS DA SILVA", "TALES MOLINA", "DANILO OLIVEIRA"]);
+    assert.equal(stage.result[0].race.positionOverall, 3);
+    assert.equal(stage.highlights.pole.driver_name, "TALES MOLINA");
+    assert.equal(stage.highlights.bestLap.driver_name, "LEONARDO LEMES");
+    assert.equal(stage.analytics.find(p => p.driver_name === "GABRIEL FERREIRA").isChampionship, false);
+});
+
+test("manifesto V2 cria três import IDs independentes e fontes recuperáveis", () => {
+    const manifest = StageImportV2.createPersistenceManifest("kart__2026-08-16__etapa_3", {
+        qualifying: "tomada.html", result: "resultado.html", laps: "voltas.html"
+    });
+    assert.equal(new Set(Object.values(manifest.sourceConfig).map(source => source.importId)).size, 3);
+    assert.deepEqual(Object.values(manifest.sourceConfig).map(source => source.tipoArquivo), ["classificacao", "resultado_final", "volta_a_volta"]);
+    assert.equal(manifest.stageSources.lapByLap.importId, "kart__2026-08-16__etapa_3__laps");
+    assert.equal(manifest.stageSources.lapByLap.backupPath, "backups_importacao/kart__2026-08-16__etapa_3__laps");
+});

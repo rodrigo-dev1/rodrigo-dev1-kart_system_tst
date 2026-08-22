@@ -169,6 +169,32 @@ test("reconciliacao mantem exatamente todos os pilotos do resultado", () => {
     });
 });
 
+test("Stage Import V2 usa somente officialPilotUids e nunca promove o resultado completo", () => {
+    const participants = [
+        { pilot_uid: "gabriel", driver_id: "1", driver_name: "GABRIEL FERREIRA" },
+        { pilot_uid: "leonardo", driver_id: "2", driver_name: "LEONARDO LEMES" }
+    ];
+    const official = identity.getOfficialStagePilots({ stageImportVersion: 2, officialPilotUids: ["leonardo"] }, participants);
+    assert.deepEqual(official.drivers.map(identity.getPilotUid), ["leonardo"]);
+    assert.deepEqual([...official.uids], ["leonardo"]);
+    assert.equal(official.source, "officialPilotUids");
+});
+
+test("Stage Import V2 inconsistente não cai no fallback legado", () => {
+    const oldWarn = console.warn;
+    console.warn = () => {};
+    try {
+        const official = identity.getOfficialStagePilots({ stageImportVersion: 2 }, [
+            { pilot_uid: "externo", driver_id: "1", driver_name: "EXTERNO" }
+        ]);
+        assert.equal(official.drivers.length, 0);
+        assert.equal(official.uids.size, 0);
+        assert.equal(official.consistent, false);
+    } finally {
+        console.warn = oldWarn;
+    }
+});
+
 test("filtro da evolucao remove externos e reconstroi posicoes relativas", () => {
     const snapshot = { positions: ["A", "X", "B", "Y", "C"].map((driver_id, index) => ({ driver_id, positionOverall: index + 1 })) };
     const geral = analytics.filtrarSnapshot(snapshot, new Set(["A", "B", "C"]), "geral");

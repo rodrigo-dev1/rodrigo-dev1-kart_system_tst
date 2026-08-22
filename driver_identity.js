@@ -234,6 +234,46 @@
         };
     }
 
+    /**
+     * Resolve the official field for a stage without deriving membership from a
+     * timing/result feed.  Stage Import V2 deliberately stores every competitor
+     * in those feeds, so `officialPilotUids` is its only authority.
+     *
+     * Old stages are passed through the legacy resolver only when they really
+     * pre-date V2.  An empty/missing V2 selection is an inconsistent import, not
+     * permission to silently promote the whole grid.
+     */
+    function getOfficialStagePilots(stageMeta = {}, participants = [], registeredDrivers = []) {
+        const version = Number(stageMeta?.stageImportVersion || 0);
+        const hasExplicitSelection = Array.isArray(stageMeta?.officialPilotUids);
+        if (version >= 2 || hasExplicitSelection) {
+            const wanted = new Set((stageMeta?.officialPilotUids || []).map(value => String(value || "").trim()).filter(Boolean));
+            if (version >= 2 && !hasExplicitSelection && typeof console !== "undefined") {
+                console.warn("[Kart/StageImportV2] officialPilotUids ausente; nenhum participante será promovido a oficial", {
+                    stage_uid: stageMeta?.stage_uid || "", stageImportVersion: version
+                });
+            }
+            const drivers = (participants || []).filter(row => wanted.has(getPilotUid(row)));
+            const byUid = new Map(drivers.map(row => [getPilotUid(row), row]));
+            // Audit objects persisted with the stage may hydrate a selected UID
+            // when a legacy participant row is temporarily unavailable.
+            (stageMeta?.officialPilots || []).forEach(row => {
+                const uid = getPilotUid(row);
+                if (wanted.has(uid) && !byUid.has(uid)) byUid.set(uid, row);
+            });
+            const resolved = [...byUid.values()];
+            return {
+                drivers: resolved,
+                uids: wanted,
+                ids: new Set(resolved.map(getDriverId).filter(Boolean)),
+                legacyNames: new Set(resolved.map(row => normalizeDriverName(getDriverName(row))).filter(Boolean)),
+                source: "officialPilotUids",
+                consistent: hasExplicitSelection
+            };
+        }
+        return { ...getStageChampionshipDrivers(participants, registeredDrivers), source: "legacy", consistent: true };
+    }
+
     function getOfficialStageDriverIds(resultRows, registeredDrivers = []) {
         const official = getStageChampionshipDrivers(resultRows, registeredDrivers);
         const missingDriverIds = official.drivers.filter(driver => !getDriverId(driver));
@@ -399,5 +439,5 @@
         };
     }
 
-    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getPilotUid, getDriverName, cleanDriverDisplayName, getDriverDisplayName, getDriverShortDisplayName, driverKey, stableHash, generatePilotUid, ensurePilotUid, findPilotByExternalId, findPilotByNormalizedName, mergePilotIdentity, resolvePilotIdentity, getStageReferenceRows, getStageChampionshipDrivers, getOfficialStageDriverIds, filterStageQualifying, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, filterStageChampionshipDrivers, reconcileStageChampionshipDrivers, compareDriverIdSets, compareStageDriverIds };
+    return { normalizeDriverId, normalizeDriverName, normalizeKartNumber, getDriverId, getPilotUid, getDriverName, cleanDriverDisplayName, getDriverDisplayName, getDriverShortDisplayName, driverKey, stableHash, generatePilotUid, ensurePilotUid, findPilotByExternalId, findPilotByNormalizedName, mergePilotIdentity, resolvePilotIdentity, getStageReferenceRows, getStageChampionshipDrivers, getOfficialStagePilots, getOfficialStageDriverIds, filterStageQualifying, createStageDriverMap, resolveStageLapParticipant, isChampionshipDriver, filterStageChampionshipDrivers, reconcileStageChampionshipDrivers, compareDriverIdSets, compareStageDriverIds };
 }));
