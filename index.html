@@ -260,23 +260,19 @@
 
 <div id="importar" class="section">
     <div class="form-card">
-        <h2>📂 Importar Arquivo</h2>
-        <p class="hint">Selecione o campeonato, a etapa, a data, o tipo de arquivo e envie apenas um arquivo por vez.</p>
+        <h2>📂 Importar Etapa</h2>
+        <p class="hint">Analise as três fontes em conjunto e selecione os pilotos oficiais uma única vez.</p>
 
         <select id="imp_camp" onchange="atualizarPreviewImportacaoAtual()"></select>
         <input type="number" id="imp_etapa" placeholder="Etapa (obrigatório)" min="1">
         <input type="date" id="imp_data">
 
-        <label class="file-label" for="imp_tipo_arquivo">Tipo de arquivo</label>
-        <select id="imp_tipo_arquivo" onchange="onTipoArquivoImportChange()">
-            <option value="">Selecione o tipo de arquivo</option>
-            <option value="resultado_final">Resultado final</option>
-            <option value="classificacao">Classificação</option>
-            <option value="volta_a_volta">Volta a volta</option>
-        </select>
-
-        <label class="file-label" for="fileImportacaoUnico" id="labelFileImportacao">Arquivo</label>
-        <input type="file" id="fileImportacaoUnico" accept=".html,.htm,.xml,.pdf">
+        <label class="file-label" for="imp_classificacao">1. Classificação / Tomada</label>
+        <input type="file" id="imp_classificacao" data-source-type="classificacao" accept=".html,.htm,.xml">
+        <label class="file-label" for="imp_resultado">2. Resultado Final</label>
+        <input type="file" id="imp_resultado" data-source-type="resultado_final" accept=".html,.htm,.xml">
+        <label class="file-label" for="imp_voltas">3. Volta a Volta</label>
+        <input type="file" id="imp_voltas" data-source-type="volta_a_volta" accept=".html,.htm,.xml">
 
         <label class="file-label">História da corrida com IA</label>
         <label style="display:flex; align-items:center; gap:8px; margin:8px 0; color:#fff; font-size:13px;">
@@ -293,12 +289,12 @@
             <div id="pyStatus" class="py-status">Selecione o tipo de arquivo e depois escolha o arquivo.</div>
         </div>
 
-        <button onclick="fazerBackupEProcessar()" style="background: #2196F3;">SALVAR ARQUIVO / GERAR PRÉVIA</button>
+        <button id="btnAnalisarEtapa" onclick="analisarArquivosEtapaV2()" style="background: #2196F3;">ANALISAR OS 3 ARQUIVOS</button>
         <button id="btnReprocessarResumos" onclick="reprocessarResumosDashboardCampeonatoAtual()" style="background:#6d4c9a; margin-top:8px;">🔄 REPROCESSAR RESUMOS DO CAMPEONATO</button>
         <p class="hint" style="margin-top:6px;">Use este botão uma única vez para etapas importadas antes desta atualização. Novas importações atualizam os resumos automaticamente.</p>
         <div id="statusImport" style="text-align: center; margin-top: 10px; color: #ffeb3b;"></div>
         <div id="previewImportacao" style="margin-top: 15px;"></div>
-        <button id="btnConfirmarImportacao" onclick="confirmarImportacao()" style="display:none;">IMPORTAR SELECIONADOS PARA O FIREBASE</button>
+        <button id="btnConfirmarImportacao" onclick="importarEtapaV2()" style="display:none;">IMPORTAR ETAPA</button>
     </div>
 </div>
 
@@ -355,6 +351,7 @@
 
 <script src="driver_identity.js"></script>
 <script src="stage_integrity.js"></script>
+<script src="stage_import_v2.js"></script>
 <script src="kart_analytics.js"></script>
 <script src="firestore_integrity.js"></script>
 <script src="script.js"></script>
