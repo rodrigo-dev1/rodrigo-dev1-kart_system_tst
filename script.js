@@ -35,6 +35,116 @@ let IMPORTACAO_PYSCRIPT = [];
 let IMPORTACAO_PYSCRIPT_ARQUIVO = "";
 let IMPORTACAO_PYSCRIPT_TIPO = "";
 let IMPORTACAO_PREVIA_GERADA = false;
+let STAGE_IMPORT_V2_STATE = null;
+
+function parseStageTableV2(html, sourceType, sourceFile) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const rows = [];
+    doc.querySelectorAll("tr").forEach(tr => {
+        const cells = [...tr.querySelectorAll("td")].map(td => String(td.textContent || "").replace(/\s+/g, " ").trim());
+        if (cells.length < 3) return;
+        const positionIndex = cells.findIndex(value => /^\d{1,2}$/.test(value));
+        const named = cells.map(value => ({ value, match: value.match(/^\[(\d+)\]\s*(.+)$/) })).find(item => item.match);
+        if (positionIndex < 0 || !named) return;
+        const kartValue = cells.find((value, index) => index !== positionIndex && /^\d{1,3}$/.test(value)) || "";
+        const lap = cells.find(value => /^\d{1,2}:\d{2}[.,]\d{3}$/.test(value) || /^\d{2}[.,]\d{3}$/.test(value)) || "";
+        rows.push({
+            positionOverall: Number(cells[positionIndex]), posicao_geral_arquivo: Number(cells[positionIndex]),
+            driver_id: named.match[1], driver_name: named.match[2], kart_numero: DriverIdentity.normalizeKartNumber(kartValue),
+            melhor_tempo: lap, melhor_tempo_segundos: StageImportV2.seconds(lap), sourceType, sourceFile, arquivo_origem: sourceFile
+        });
+    });
+    return rows.filter((row, index, all) => all.findIndex(item => item.driver_id === row.driver_id) === index);
+}
+
+function renderStageParticipantsV2() {
+    const state = STAGE_IMPORT_V2_STATE;
+    const preview = document.getElementById("previewImportacao");
+    if (!state || !preview) return;
+    const validation = state.validation;
+    preview.innerHTML = `<h3>Validação da etapa</h3>
+        <p>${validation.valid ? "✅ Arquivos compatíveis" : "❌ Arquivos incompatíveis"} · ${state.files.qualifying.length} na tomada · ${state.files.result.length} no resultado · ${state.files.laps.length} voltas</p>
+        ${validation.errors.map(error => `<p class="error">❌ ${htmlEscape(error.code)} ${htmlEscape(error.field || error.source || "")}</p>`).join("")}
+        <div class="dashboard-table-wrap"><table><thead><tr><th>Importar?</th><th>Piloto</th><th>ID</th><th>Kart</th><th>Tomada</th><th>Resultado</th><th>Volta a volta</th><th>Status</th></tr></thead><tbody>
+        ${state.built.participants.map((p, index) => {
+            const count = Object.values(p.sources).filter(Boolean).length;
+            const status = p.conflict ? "❌ Conflito de identidade" : count === 3 ? "✅ Consistente nos 3 arquivos" : `⚠️ Encontrado em ${count} de 3`;
+            return `<tr><td><input type="checkbox" id="stage_official_${index}" ${p.suggestedOfficial ? "checked" : ""} ${p.conflict ? "disabled" : ""}></td><td>${htmlEscape(p.display_name)}</td><td>${htmlEscape(p.driver_id || "-")}</td><td>${htmlEscape(p.kart_number || "-")}</td><td>${p.sources.qualifying ? "✅" : "—"}</td><td>${p.sources.result ? "✅" : "—"}</td><td>${p.sources.laps ? "✅" : "—"}</td><td>${status}</td></tr>`;
+        }).join("")}</tbody></table></div>`;
+    const button = document.getElementById("btnConfirmarImportacao");
+    if (button) button.style.display = validation.valid ? "block" : "none";
+}
+
+async function analisarArquivosEtapaV2() {
+    const status = document.getElementById("statusImport");
+    const inputs = { qualifying: document.getElementById("imp_classificacao"), result: document.getElementById("imp_resultado"), laps: document.getElementById("imp_voltas") };
+    if (Object.values(inputs).some(input => !input?.files?.[0])) return alert("Selecione os três arquivos da etapa.");
+    try {
+        if (status) status.textContent = "⏳ Analisando e reconciliando as três fontes...";
+        const contents = Object.fromEntries(await Promise.all(Object.entries(inputs).map(async ([key, input]) => [key, await input.files[0].text()])));
+        const files = {
+            qualifying: parseStageTableV2(contents.qualifying, "classificacao", inputs.qualifying.files[0].name),
+            result: parseStageTableV2(contents.result, "resultado_final", inputs.result.files[0].name),
+            laps: extrairVoltaAVoltaHTMLTexto(contents.laps, inputs.laps.files[0].name)
+        };
+        const built = StageImportV2.buildStageParticipants(files);
+        const championship = getChampionshipDrivers(document.getElementById("imp_camp")?.value || "");
+        built.participants.forEach(p => { p.suggestedOfficial = championship.ids.has(p.driver_id); });
+        const validation = StageImportV2.validateStageFiles(files);
+        STAGE_IMPORT_V2_STATE = { files, contents, names: Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.files[0].name])), built, validation };
+        renderStageParticipantsV2();
+        if (status) status.textContent = validation.valid ? "✅ Análise concluída. Selecione os pilotos oficiais uma única vez." : "❌ Corrija os conflitos antes de importar.";
+    } catch (error) {
+        console.error("[Kart/StageImportV2]", error);
+        if (status) status.textContent = `❌ ${error.message || error}`;
+    }
+}
+window.analisarArquivosEtapaV2 = analisarArquivosEtapaV2;
+
+async function importarEtapaV2() {
+    if (!STAGE_IMPORT_V2_STATE?.validation?.valid) return alert("Analise três arquivos compatíveis antes de importar.");
+    if (!await pedirSenhaAdmin()) return;
+    const campeonato = document.getElementById("imp_camp")?.value || "", etapa = Number(document.getElementById("imp_etapa")?.value), dataCorrida = document.getElementById("imp_data")?.value || "";
+    const selected = STAGE_IMPORT_V2_STATE.built.participants.filter((_, index) => document.getElementById(`stage_official_${index}`)?.checked);
+    if (!campeonato || !etapa || !dataCorrida || !selected.length) return alert("Informe campeonato, etapa, data e ao menos um piloto oficial.");
+    const status = document.getElementById("statusImport");
+    const stageUid = StageImportV2.createStageUid(campeonato, dataCorrida, etapa);
+    try {
+        if (status) status.textContent = "⏳ Persistindo fontes da etapa...";
+        const officialPilotUids = selected.map(p => p.pilot_uid);
+        const processed = StageImportV2.processStage({ ...STAGE_IMPORT_V2_STATE.files, officialPilotUids, scoring: PONTOS_PADRAO });
+        const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
+        const resultId = getResultadoFinalDocId(etapa, dataCorrida), ref = campRef.collection("resultado_final").doc(resultId);
+        const now = new Date().toISOString();
+        await ref.set(toFirestoreSafe({ campeonato, campeonato_id: campeonatoDocId, etapa, dataCorrida, stage_uid: stageUid, stageKey: StageIntegrity.createStageKey(campeonatoDocId, etapa, dataCorrida), stageImportVersion: 2, analyticsVersion: 2, officialPilotUids, stageImport: { status: "processing", files: { qualifying: true, result: true, lapByLap: true }, startedAtISO: now }, dashboardOculto: true }), { merge: true });
+        const ops = [];
+        for (const [source, content] of Object.entries(STAGE_IMPORT_V2_STATE.contents)) {
+            const backupId = `${stageUid}__${source}`;
+            ops.push({ tipo: "set", ref: firestore.collection(COLLECTION_BACKUPS).doc(backupId), payload: { campeonato_id: campeonatoDocId, etapa, dataCorrida, stage_uid: stageUid, sourceType: StageImportV2.TYPES[source], nomeArquivo: STAGE_IMPORT_V2_STATE.names[source], conteudoRaw: content, active: true, stageImportVersion: 2, criadoEmISO: now } });
+        }
+        processed.analytics.forEach(row => {
+            ops.push({ tipo: "set", ref: ref.collection("pilot_analytics").doc(row.pilot_uid), payload: { ...row, stage_uid: stageUid, analyticsVersion: 2 } });
+            if (row.qualifying) ops.push({ tipo: "set", ref: ref.collection("classificacao").doc(row.pilot_uid), payload: { pilot_uid: row.pilot_uid, driver_id: row.driver_id, driver_name: row.driver_name, kart_numero: row.kart_number, positionOverall: row.qualifying.positionOverall, positionChampionship: row.qualifying.positionChampionship, posicao_geral_arquivo: row.qualifying.positionOverall, posicao_final2: row.qualifying.positionChampionship, melhor_tempo: row.qualifying.bestLapFormatted, melhor_tempo_segundos: row.qualifying.bestLap, bestLap: row.qualifying.bestLap, sourceType: "classificacao", sourceFile: row.qualifying.sourceFile, stage_uid: stageUid, idImportacao: `${stageUid}__qualifying`, isChampionship: row.isChampionship } });
+            if (row.race) ops.push({ tipo: "set", ref: ref.collection("pilotos_resultado").doc(row.pilot_uid), payload: { pilot_uid: row.pilot_uid, driver_id: row.driver_id, driver_name: row.driver_name, kart_numero: row.kart_number, positionOverall: row.race.positionOverall, positionChampionship: row.race.positionChampionship, posicao_geral_arquivo: row.race.positionOverall, posicao_final2: row.race.positionChampionship, melhor_tempo: row.race.bestLapFormatted, melhor_tempo_segundos: row.race.bestLap, pontos: row.scoring.base, melhor_tempo_ponto: row.scoring.bonusBestLap, bonusGrid: row.scoring.bonusGrid, sourceType: "resultado_final", sourceFile: row.race.sourceFile, stage_uid: stageUid, idImportacao: `${stageUid}__result`, isChampionship: row.isChampionship } });
+        });
+        processed.participants.forEach(p => ops.push({ tipo: "set", ref: ref.collection("participantes_etapa").doc(p.pilot_uid), payload: { ...p, observations: null, stage_uid: stageUid } }));
+        await executarBatchFirestore(ops);
+        await ref.set({ stageImport: { status: "complete", files: { qualifying: true, result: true, lapByLap: true }, completedAtISO: new Date().toISOString() }, dashboardOculto: false }, { merge: true });
+        await recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, atualizarGeral: true });
+        limparCacheDashboardCampeonato(campeonatoDocId);
+        console.log("[Kart/TalesTrace]", processed.analytics.find(p => p.driver_id === "233543") || { info: "trace genérico: Tales não participa desta etapa" });
+        if (status) status.textContent = `✅ Etapa importada em operação única (${selected.length} oficiais).`;
+        await inicializarRankingFirestore();
+    } catch (error) {
+        console.error("[Kart/StageImportV2]", error);
+        if (status) status.textContent = `❌ ${error.message || error}`;
+        try {
+            const { campRef } = await prepararDocumentoCampeonato(campeonato);
+            await campRef.collection("resultado_final").doc(getResultadoFinalDocId(etapa, dataCorrida)).set({ stageImport: { status: "error", message: String(error.message || error), failedAtISO: new Date().toISOString() }, dashboardOculto: true }, { merge: true });
+        } catch (_) { /* mantém o erro original */ }
+    }
+}
+window.importarEtapaV2 = importarEtapaV2;
 
 let RANKING_FIRESTORE_CACHE = [];
 let RANKING_ABA_ATUAL = "pilotos";
@@ -5673,7 +5783,7 @@ function dashboardCardsEtapa(stat) {
             titulo: "🎯 Pole Position",
             piloto: stat.pole,
             valor: stat.pole?.melhor_tempo || "-",
-            descricao: "Melhor posição da classificação",
+            descricao: "Melhor posição da classificação entre os pilotos do campeonato",
             vazio: !stat.pole,
             indisponivel: !stat.pole && !stat.completo?.classificacao
         }),
@@ -7172,6 +7282,32 @@ async function limparDadosImportacaoCampeonato(campeonato, { dryRun = true } = {
     return report;
 }
 window.limparDadosImportacaoCampeonato = limparDadosImportacaoCampeonato;
+
+async function deleteStageCascade(campeonato, stageId) {
+    const campeonatoId = FirestoreIntegrity.requireFirestoreId(normalizarDocId(campeonato), "campeonatoId");
+    const stageDocId = FirestoreIntegrity.requireFirestoreId(stageId, "stageId");
+    const campRef = firestore.collection(COLLECTION_CAMPEONATOS).doc(campeonatoId);
+    const stageRef = campRef.collection("resultado_final").doc(stageDocId);
+    const stageSnap = await stageRef.get();
+    if (!stageSnap.exists) return { deleted: false, reason: "not_found" };
+    const metadata = stageSnap.data() || {};
+    const collections = ["pilotos_resultado", "classificacao", "volta_a_volta_pilotos", "historias_pilotos", "analytics", "participantes_etapa", "voltas_processadas", "pilot_analytics", "pilotos_resultado_v2", "classificacao_v2", "voltas_processadas_v2"];
+    const snapshots = await Promise.all(collections.map(name => stageRef.collection(name).get()));
+    const operations = snapshots.flatMap(snapshot => snapshot.docs.map(doc => ({ tipo: "delete", ref: doc.ref })));
+    const lapFiles = await campRef.collection("volta_a_volta").where("stage_uid", "==", metadata.stage_uid || "__missing__").get();
+    lapFiles.docs.forEach(doc => operations.push({ tipo: "delete", ref: doc.ref }));
+    operations.push({ tipo: "delete", ref: stageRef });
+    await executarBatchFirestore(operations);
+    if (metadata.stage_uid) {
+        const backups = await firestore.collection(COLLECTION_BACKUPS).where("stage_uid", "==", metadata.stage_uid).get();
+        await executarBatchFirestore(backups.docs.map(doc => ({ tipo: "set", ref: doc.ref, payload: { active: false, archivedAtISO: new Date().toISOString() } })));
+    }
+    limparCacheDashboardCampeonato(campeonatoId);
+    await recalcularPersistirResumoGeralDashboard(campeonatoId, campeonato);
+    await persistirPilotSummariesCampeonato(campRef, campeonatoId);
+    return { deleted: true, stageId: stageDocId, documents: operations.length };
+}
+window.deleteStageCascade = deleteStageCascade;
 
 /* V4: consulta apenas resumos persistidos; exclusão também recalcula dashboard e etapas vazias ficam ocultas. */
 async function carregarDashboardCampeonato(campeonatoDocId, force = false) {

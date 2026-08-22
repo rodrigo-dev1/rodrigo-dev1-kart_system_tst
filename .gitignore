@@ -1,0 +1,5 @@
+# Artefatos locais de validação visual / Playwright
+/stage-result-v2.png
+/debug/*.png
+/test-results/
+/playwright-report/
