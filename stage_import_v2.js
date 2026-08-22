@@ -134,5 +134,23 @@
         return `${slug}__${date}__etapa_${Number(stageNumber)}`;
     }
 
-    return { TYPES, seconds, formatLap, buildStageParticipants, validateStageFiles, processStage, createStageUid };
+    function createPersistenceManifest(stageUid, filenames = {}) {
+        if (!text(stageUid)) throw new Error("stage_uid obrigatório");
+        const sourceConfig = {
+            qualifying: { importId: `${stageUid}__qualifying`, tipoArquivo: TYPES.qualifying, tipoLabel: "Classificação / Tomada" },
+            result: { importId: `${stageUid}__result`, tipoArquivo: TYPES.result, tipoLabel: "Resultado Final" },
+            laps: { importId: `${stageUid}__laps`, tipoArquivo: TYPES.laps, tipoLabel: "Volta a volta" }
+        };
+        return {
+            stageImportId: stageUid,
+            sourceConfig,
+            stageSources: {
+                qualifying: { importId: sourceConfig.qualifying.importId, backupPath: `backups_importacao/${sourceConfig.qualifying.importId}`, filename: filenames.qualifying || "" },
+                result: { importId: sourceConfig.result.importId, backupPath: `backups_importacao/${sourceConfig.result.importId}`, filename: filenames.result || "" },
+                lapByLap: { importId: sourceConfig.laps.importId, backupPath: `backups_importacao/${sourceConfig.laps.importId}`, filename: filenames.laps || "" }
+            }
+        };
+    }
+
+    return { TYPES, seconds, formatLap, buildStageParticipants, validateStageFiles, processStage, createStageUid, createPersistenceManifest };
 }));

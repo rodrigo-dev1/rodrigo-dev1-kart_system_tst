@@ -172,11 +172,17 @@ async function importarEtapaV2() {
         const { campeonatoDocId, campRef } = await prepararDocumentoCampeonato(campeonato);
         const resultId = getResultadoFinalDocId(etapa, dataCorrida), ref = campRef.collection("resultado_final").doc(resultId);
         const now = new Date().toISOString();
-        await ref.set(toFirestoreSafe({ campeonato, campeonato_id: campeonatoDocId, etapa, dataCorrida, stage_uid: stageUid, stageKey: StageIntegrity.createStageKey(campeonatoDocId, etapa, dataCorrida), stageImportVersion: 2, analyticsVersion: 2, officialPilotUids, stageImport: { status: "processing", files: { qualifying: true, result: true, lapByLap: true }, startedAtISO: now }, dashboardOculto: true }), { merge: true });
+        const manifest = StageImportV2.createPersistenceManifest(stageUid, STAGE_IMPORT_V2_STATE.names);
+        const { sourceConfig, stageSources } = manifest;
+        const officialPilots = selected.map(p => ({ pilot_uid: p.pilot_uid, driver_id: p.driver_id || null, driver_name: p.display_name || "" }));
+        // This write intentionally precedes every derived row and dashboard
+        // calculation. A refresh/reprocess can therefore never rediscover the
+        // official field from the complete result.
+        await ref.set(toFirestoreSafe({ campeonato, campeonato_id: campeonatoDocId, etapa, dataCorrida, stage_uid: stageUid, stageKey: StageIntegrity.createStageKey(campeonatoDocId, etapa, dataCorrida), stageImportVersion: 2, analyticsVersion: 2, officialPilotUids, officialPilots, stageSources, classificacaoResumo: { idImportacao: sourceConfig.qualifying.importId, nomeArquivo: STAGE_IMPORT_V2_STATE.names.qualifying }, resultadoFinalResumo: { idImportacao: sourceConfig.result.importId, nomeArquivo: STAGE_IMPORT_V2_STATE.names.result }, voltaAVoltaResumo: { idImportacao: sourceConfig.laps.importId, nomeArquivo: STAGE_IMPORT_V2_STATE.names.laps }, ultimoVoltaAVoltaImportado: sourceConfig.laps.importId, stageImport: { status: "processing", files: { qualifying: true, result: true, lapByLap: true }, startedAtISO: now }, dashboardOculto: true }), { merge: true });
         const ops = [];
         for (const [source, content] of Object.entries(STAGE_IMPORT_V2_STATE.contents)) {
-            const backupId = `${stageUid}__${source}`;
-            ops.push({ tipo: "set", ref: firestore.collection(COLLECTION_BACKUPS).doc(backupId), payload: { campeonato_id: campeonatoDocId, etapa, dataCorrida, stage_uid: stageUid, sourceType: StageImportV2.TYPES[source], nomeArquivo: STAGE_IMPORT_V2_STATE.names[source], conteudoRaw: content, active: true, stageImportVersion: 2, criadoEmISO: now } });
+            const config = sourceConfig[source];
+            ops.push({ tipo: "set", ref: firestore.collection(COLLECTION_BACKUPS).doc(config.importId), payload: { idImportacao: config.importId, stageImportId: stageUid, stageImportVersion: 2, campeonato, campeonato_id: campeonatoDocId, etapa, dataCorrida, tipoArquivo: config.tipoArquivo, tipoLabel: config.tipoLabel, sourceType: config.tipoArquivo, nomeArquivo: STAGE_IMPORT_V2_STATE.names[source], mimeType: STAGE_IMPORT_V2_STATE[source === "laps" ? "lapByLap" : source]?.file?.type || "text/html", conteudo: content, conteudoRaw: content, arquivoCompletoSalvoNoFirestore: true, dataUploadISO: now, criadoEmISO: now, stage_uid: stageUid, active: true } });
         }
         processed.analytics.forEach(row => {
             ops.push({ tipo: "set", ref: ref.collection("pilot_analytics").doc(row.pilot_uid), payload: { ...row, stage_uid: stageUid, analyticsVersion: 2 } });
@@ -3289,6 +3295,40 @@ async function carregarHistorico() {
             });
         });
 
+        // Recovery path for the first V2 implementation: it wrote the stage
+        // document but no independent backups, leaving the user with no way to
+        // remove the broken import. Expose one removable audit entry per such
+        // stage; new V2 imports continue to appear as their three normal files.
+        try {
+            const camps = await firestore.collection(COLLECTION_CAMPEONATOS).get();
+            const stagesByCamp = await Promise.all(camps.docs.map(async campDoc => ({
+                campDoc,
+                stages: await campDoc.ref.collection("resultado_final").get()
+            })));
+            const backedStageIds = new Set(HISTORICO_CACHE.map(item => String(item.stageImportId || item.stage_uid || "")).filter(Boolean));
+            stagesByCamp.forEach(({ campDoc, stages }) => stages.docs.forEach(stageDoc => {
+                const stage = stageDoc.data() || {};
+                const stageId = String(stage.stage_uid || "").trim();
+                if (Number(stage.stageImportVersion || 0) < 2 || (stageId && backedStageIds.has(stageId))) return;
+                HISTORICO_CACHE.push({
+                    key: `stage_fallback__${campDoc.id}__${stageDoc.id}`,
+                    syntheticStageFallback: true,
+                    campeonatoDocId: campDoc.id,
+                    resultadoDocId: stageDoc.id,
+                    campeonato: stage.campeonato || campDoc.data()?.nome || campDoc.id,
+                    etapa: stage.etapa,
+                    dataCorrida: stage.dataCorrida,
+                    dataUploadISO: stage.stageImport?.startedAtISO || stage.atualizadoEmISO || "",
+                    stage_uid: stageId,
+                    stageImportId: stageId,
+                    tipoLabel: "Importação V2 incompleta (etapa)",
+                    nomeArquivo: "Backups ausentes — exclusão de recuperação disponível"
+                });
+            }));
+        } catch (recoveryError) {
+            console.warn("[Kart/StageImportV2] não foi possível listar etapas V2 órfãs", recoveryError);
+        }
+
         if (!HISTORICO_CACHE.length) {
             if (lista) lista.innerHTML = "<p class='muted'>Nenhum arquivo encontrado.</p>";
             return;
@@ -3659,13 +3699,18 @@ async function limparMetadadosDaImportacaoExcluida({ resultRef, tipoArquivo, key
     const data = snap.data() || {};
     const del = firestoreDeleteValue();
     const payload = { atualizadoEmISO: new Date().toISOString() };
+    const stageSources = { ...(data.stageSources || {}) };
 
     if (tipoArquivo === "resultado_final" && String(data?.resultadoFinalResumo?.idImportacao || "") === String(key || "")) {
         payload.resultadoFinalResumo = del;
+        delete stageSources.result;
+        payload.stageSources = stageSources;
     }
 
     if (tipoArquivo === "classificacao" && String(data?.classificacaoResumo?.idImportacao || "") === String(key || "")) {
         payload.classificacaoResumo = del;
+        delete stageSources.qualifying;
+        payload.stageSources = stageSources;
     }
 
     // O fluxo específico do Volta a volta já remove estes campos quando o
@@ -3673,6 +3718,8 @@ async function limparMetadadosDaImportacaoExcluida({ resultRef, tipoArquivo, key
     // antigos que não passaram por aquela rotina.
     if (tipoArquivo === "volta_a_volta" && importacaoVoltaAVoltaPertenceAoBackup(data, key)) {
         Object.assign(payload, payloadLimpezaResumoVoltaAVolta());
+        delete stageSources.lapByLap;
+        payload.stageSources = stageSources;
     }
 
     if (String(data.ultimoIdImportacao || "") === String(key || "")) {
@@ -3749,7 +3796,34 @@ async function excluirImportacao(key) {
     if (!confirm("Excluir importação e todos os dados relacionados nas collections/subcollections? O dashboard da etapa será recalculado automaticamente.")) return;
 
     const doc = await firestore.collection(COLLECTION_BACKUPS).doc(key).get();
-    if (!doc.exists) return alert("Importação não encontrada.");
+    if (!doc.exists) {
+        const fallback = HISTORICO_CACHE.find(item => item.key === key && item.syntheticStageFallback);
+        if (!fallback) return alert("Importação não encontrada.");
+        try {
+            const campRef = firestore.collection(COLLECTION_CAMPEONATOS).doc(fallback.campeonatoDocId);
+            const resultRef = campRef.collection("resultado_final").doc(fallback.resultadoDocId);
+            const subcollections = ["classificacao", "pilotos_resultado", "volta_a_volta_pilotos", "historias_pilotos", "pilot_analytics", "participantes_etapa", "voltas_processadas", "pilotos_resultado_v2", "classificacao_v2", "voltas_processadas_v2"];
+            const snapshots = await Promise.all(subcollections.map(name => resultRef.collection(name).get()));
+            await executarBatchFirestore(snapshots.flatMap(snap => snap.docs.map(item => ({ tipo: "delete", ref: item.ref }))));
+            const del = firestoreDeleteValue();
+            await resultRef.set({
+                classificacaoResumo: del, resultadoFinalResumo: del, voltaAVoltaResumo: del,
+                ultimoVoltaAVoltaImportado: del, dashboardResumo: del, dashboardResumoVersao: del,
+                stageSources: del, officialPilotUids: del, officialPilots: del, officialDriverIds: del,
+                stageSummary: del, stageHighlights: del, stageImport: del, dashboardOculto: true,
+                atualizadoEmISO: new Date().toISOString()
+            }, { merge: true });
+            await recalcularPersistirResumoGeralDashboard(campRef.id, fallback.campeonato);
+            limparCacheDashboardCampeonato(campRef.id);
+            alert("Etapa V2 incompleta removida com segurança. O cadastro mestre dos pilotos foi preservado.");
+            await carregarHistorico();
+            await inicializarRankingFirestore();
+        } catch (error) {
+            console.error(error);
+            alert(`Erro ao excluir etapa V2 incompleta: ${error.message || error}`);
+        }
+        return;
+    }
 
     const item = doc.data() || {};
     const campeonato = String(item.campeonato || "").trim();
@@ -6477,6 +6551,25 @@ async function dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVo
         };
     }
 
+    // V2 canonical source, followed by fields retained for old imports. Raw
+    // content lives in the independent backup document and survives a refresh.
+    const importIds = [
+        meta?.stageSources?.lapByLap?.importId,
+        meta?.voltaAVoltaResumo?.idImportacao,
+        meta?.ultimoVoltaAVoltaImportado
+    ].map(value => String(value || "").trim()).filter((value, index, all) => value && all.indexOf(value) === index);
+    for (const importId of importIds) {
+        const backup = await firestore.collection(COLLECTION_BACKUPS).doc(importId).get();
+        if (!backup.exists) continue;
+        const data = backup.data() || {};
+        const conteudo = data.conteudo || data.conteudoRaw || "";
+        if (!String(conteudo).trim()) continue;
+        return {
+            voltas: extrairVoltaAVoltaHTMLTexto(conteudo, data.nomeArquivo || meta?.stageSources?.lapByLap?.filename || "volta_a_volta.html"),
+            fonte: { idImportacao: importId, nomeArquivo: data.nomeArquivo || "", origem: "stageSources.lapByLap", backupPath: backup.ref.path }
+        };
+    }
+
     const snapshot = await campRef.collection("volta_a_volta").get();
     const candidatos = snapshot.docs.map(doc => ({ id: doc.id, data: doc.data() || {} })).filter(doc => {
         const etapaA = Number(doc.data.etapa || 0);
@@ -6533,11 +6626,11 @@ function dashboardExtrairGridCompletoHTML(conteudo = "") {
 }
 
 async function dashboardBuscarGridCompletoEtapa(meta, classificacaoFallback = []) {
-    const importId = String(meta?.classificacaoResumo?.idImportacao || "").trim();
+    const importId = String(meta?.stageSources?.qualifying?.importId || meta?.classificacaoResumo?.idImportacao || "").trim();
     if (!importId) return classificacaoFallback;
     const backup = await firestore.collection(COLLECTION_BACKUPS).doc(importId).get();
     if (!backup.exists) return classificacaoFallback;
-    const rows = dashboardExtrairGridCompletoHTML(backup.data()?.conteudo || "");
+    const rows = dashboardExtrairGridCompletoHTML(backup.data()?.conteudo || backup.data()?.conteudoRaw || "");
     if (!rows.length) throw new Error(`[Kart/Overtakes] classificação bruta sem grid válido: ${importId}`);
     console.log("[Kart/Overtakes/GridSource]", { importId, participants: rows.length, source: backup.ref.path });
     return rows;
@@ -6611,7 +6704,7 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
     // fallback legado e nunca pode substituir um Resultado Final mais novo.
     const corridaRaw = corridaFallback.length ? corridaFallback : DriverIdentity.getStageReferenceRows(meta, [], classificacaoFallback);
     const corridaResolvida = await resolverPersistirIdentidades(corridaRaw, registry, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "resultado_final" });
-    const officialFromResult = DriverIdentity.getOfficialStageDriverIds(corridaResolvida.rows, pilotosCadastrados.pilotos);
+    const officialFromResult = DriverIdentity.getOfficialStagePilots(meta, corridaResolvida.rows, pilotosCadastrados.pilotos);
     const corridaOrdenada = StageIntegrity.buildChampionshipResult(corridaResolvida.rows, officialFromResult.uids);
     const corrida = StageIntegrity.applyChampionshipScoring(corridaOrdenada, PONTOS_PADRAO).map(row => ({
         ...row, posicao_geral_arquivo: row.positionOverall
@@ -6619,7 +6712,7 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
     StageIntegrity.validateScoringBeforePersist(corrida, PONTOS_PADRAO);
     const classificacaoCompletaRaw = await dashboardBuscarGridCompletoEtapa(meta, classificacaoFallback);
     const classificacaoResolvida = await resolverPersistirIdentidades(classificacaoCompletaRaw, corridaResolvida.identities, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "classificacao" });
-    const oficiaisEtapa = DriverIdentity.getOfficialStageDriverIds(corrida, pilotosCadastrados.pilotos);
+    const oficiaisEtapa = DriverIdentity.getOfficialStagePilots(meta, corridaResolvida.rows, pilotosCadastrados.pilotos);
     const pilotosCampeonato = {
         pilotos: oficiaisEtapa.drivers,
         ids: oficiaisEtapa.ids,
@@ -6647,8 +6740,8 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
     const vinculosVolta = vinculosVoltaSnap.docs.map(doc => ({ docId: doc.id, ...(doc.data() || {}) }));
     const voltasPreCanonicas = dashboardCanonicalizarVoltasEtapa(
         voltaInfo.voltas || [],
-        corrida,
-        classificacao,
+        corridaResolvida.rows,
+        classificacaoResolvida.rows,
         pilotosCampeonato,
         vinculosVolta
     );
