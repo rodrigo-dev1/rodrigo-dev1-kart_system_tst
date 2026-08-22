@@ -152,5 +152,46 @@
         };
     }
 
-    return { TYPES, seconds, formatLap, buildStageParticipants, validateStageFiles, processStage, createStageUid, createPersistenceManifest };
+    // Firestore limits a document to 1 MiB. This is only a diagnostic estimate
+    // (the SDK adds its own encoding overhead), so aggregated documents warn at
+    // a deliberately lower threshold.
+    function estimateFirestoreDocumentSize(data) {
+        const json = JSON.stringify(data ?? null);
+        return typeof Blob === "function" ? new Blob([json]).size : Buffer.byteLength(json, "utf8");
+    }
+
+    function buildCanonicalSourceDocuments({ qualifying = [], result = [], laps = [], officialPilotUids = [], importIds = {}, stageImportId = "" }) {
+        const built = buildStageParticipants({ qualifying, result, laps });
+        if (built.conflicts.length) throw new Error("Conflito de identidade nos arquivos da etapa");
+        const official = new Set(officialPilotUids);
+        const common = participant => ({
+            pilot_uid: participant.pilot_uid,
+            driver_id: participant.driver_id || null,
+            driver_name: participant.display_name,
+            kart_number: participant.kart_number || "",
+            kart_numero: participant.kart_number || "",
+            isChampionship: official.has(participant.pilot_uid),
+            stageImportId
+        });
+        const ranked = (source, rows) => [...rows].sort((a, b) => overall(a) - overall(b));
+        const championshipPosition = (row, source) => {
+            const eligible = ranked(source, (source === "qualifying" ? qualifying : result).filter(candidate => {
+                const match = built.participants.find(p => p.observations[source]?.includes(candidate));
+                return match && official.has(match.pilot_uid);
+            }));
+            return eligible.indexOf(row) + 1 || null;
+        };
+        const documents = { classificacao: [], pilotos_resultado: [], volta_a_volta_pilotos: [] };
+        built.participants.forEach(participant => {
+            const q = participant.observations.qualifying?.[0];
+            const r = participant.observations.result?.[0];
+            if (q) documents.classificacao.push({ ...q, ...common(participant), positionOverall: overall(q), positionChampionship: official.has(participant.pilot_uid) ? championshipPosition(q, "qualifying") : null, bestLap: seconds(q.bestLap ?? q.melhor_tempo_segundos ?? q.melhor_tempo), bestLapFormatted: formatLap(q.bestLap ?? q.melhor_tempo_segundos ?? q.melhor_tempo), importId: importIds.qualifying || "", idImportacao: importIds.qualifying || "" });
+            if (r) documents.pilotos_resultado.push({ ...r, ...common(participant), positionOverall: overall(r), positionChampionship: official.has(participant.pilot_uid) ? championshipPosition(r, "result") : null, laps: Number(r.laps ?? r.voltas ?? 0), totalTime: r.totalTime ?? r.tempo_total ?? null, bestLap: seconds(r.bestLap ?? r.melhor_tempo_segundos ?? r.melhor_tempo), importId: importIds.result || "", idImportacao: importIds.result || "" });
+            const pilotLaps = participant.observations.laps || [];
+            if (pilotLaps.length) documents.volta_a_volta_pilotos.push({ ...common(participant), laps: pilotLaps, lapCount: pilotLaps.length, importId: importIds.laps || "", idImportacao: importIds.laps || "" });
+        });
+        return documents;
+    }
+
+    return { TYPES, seconds, formatLap, buildStageParticipants, validateStageFiles, processStage, createStageUid, createPersistenceManifest, estimateFirestoreDocumentSize, buildCanonicalSourceDocuments };
 }));

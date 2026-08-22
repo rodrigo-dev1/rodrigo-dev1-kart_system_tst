@@ -165,6 +165,7 @@ async function importarEtapaV2() {
     if (!campeonato || !etapa || !dataCorrida || !selected.length) return alert("Informe campeonato, etapa, data e ao menos um piloto oficial.");
     const status = document.getElementById("statusImport");
     const stageUid = StageImportV2.createStageUid(campeonato, dataCorrida, etapa);
+    let sourcesPersisted = false;
     try {
         if (status) status.textContent = "⏳ Persistindo fontes da etapa...";
         const officialPilotUids = selected.map(p => p.pilot_uid);
@@ -174,6 +175,7 @@ async function importarEtapaV2() {
         const now = new Date().toISOString();
         const manifest = StageImportV2.createPersistenceManifest(stageUid, STAGE_IMPORT_V2_STATE.names);
         const { sourceConfig, stageSources } = manifest;
+        const sourceDocuments = StageImportV2.buildCanonicalSourceDocuments({ ...STAGE_IMPORT_V2_STATE.files, officialPilotUids, stageImportId: stageUid, importIds: Object.fromEntries(Object.entries(sourceConfig).map(([key, value]) => [key, value.importId])) });
         const officialPilots = selected.map(p => ({ pilot_uid: p.pilot_uid, driver_id: p.driver_id || null, driver_name: p.display_name || "" }));
         // This write intentionally precedes every derived row and dashboard
         // calculation. A refresh/reprocess can therefore never rediscover the
@@ -186,13 +188,19 @@ async function importarEtapaV2() {
         }
         processed.analytics.forEach(row => {
             ops.push({ tipo: "set", ref: ref.collection("pilot_analytics").doc(row.pilot_uid), payload: { ...row, stage_uid: stageUid, analyticsVersion: 2 } });
-            if (row.qualifying) ops.push({ tipo: "set", ref: ref.collection("classificacao").doc(row.pilot_uid), payload: { pilot_uid: row.pilot_uid, driver_id: row.driver_id, driver_name: row.driver_name, kart_numero: row.kart_number, positionOverall: row.qualifying.positionOverall, positionChampionship: row.qualifying.positionChampionship, posicao_geral_arquivo: row.qualifying.positionOverall, posicao_final2: row.qualifying.positionChampionship, melhor_tempo: row.qualifying.bestLapFormatted, melhor_tempo_segundos: row.qualifying.bestLap, bestLap: row.qualifying.bestLap, sourceType: "classificacao", sourceFile: row.qualifying.sourceFile, stage_uid: stageUid, idImportacao: `${stageUid}__qualifying`, isChampionship: row.isChampionship } });
-            if (row.race) ops.push({ tipo: "set", ref: ref.collection("pilotos_resultado").doc(row.pilot_uid), payload: { pilot_uid: row.pilot_uid, driver_id: row.driver_id, driver_name: row.driver_name, kart_numero: row.kart_number, positionOverall: row.race.positionOverall, positionChampionship: row.race.positionChampionship, posicao_geral_arquivo: row.race.positionOverall, posicao_final2: row.race.positionChampionship, melhor_tempo: row.race.bestLapFormatted, melhor_tempo_segundos: row.race.bestLap, pontos: row.scoring.base, melhor_tempo_ponto: row.scoring.bonusBestLap, bonusGrid: row.scoring.bonusGrid, sourceType: "resultado_final", sourceFile: row.race.sourceFile, stage_uid: stageUid, idImportacao: `${stageUid}__result`, isChampionship: row.isChampionship } });
         });
+        Object.entries(sourceDocuments).forEach(([collection, rows]) => rows.forEach(row => ops.push({ tipo: "set", ref: ref.collection(collection).doc(row.pilot_uid), payload: toFirestoreSafe(row) })));
+        Object.entries(sourceDocuments).forEach(([collection, rows]) => console.info(`[Kart/FirestoreSize] Largest ${collection} doc: ${(Math.max(0, ...rows.map(StageImportV2.estimateFirestoreDocumentSize)) / 1024).toFixed(1)} KB`, { documents: rows.length }));
         processed.participants.forEach(p => ops.push({ tipo: "set", ref: ref.collection("participantes_etapa").doc(p.pilot_uid), payload: { ...p, observations: null, stage_uid: stageUid } }));
         await executarBatchFirestore(ops);
+        sourcesPersisted = true;
+        try {
+            await recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, atualizarGeral: true });
+        } catch (analyticsError) {
+            await ref.set({ stageImport: { status: "analytics_error", files: { qualifying: true, result: true, lapByLap: true }, message: String(analyticsError.message || analyticsError), failedAtISO: new Date().toISOString() }, dashboardOculto: true }, { merge: true });
+            throw analyticsError;
+        }
         await ref.set({ stageImport: { status: "complete", files: { qualifying: true, result: true, lapByLap: true }, completedAtISO: new Date().toISOString() }, dashboardOculto: false }, { merge: true });
-        await recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, atualizarGeral: true });
         limparCacheDashboardCampeonato(campeonatoDocId);
         console.log("[Kart/TalesTrace]", processed.analytics.find(p => p.driver_id === "233543") || { info: "trace genérico: Tales não participa desta etapa" });
         if (status) status.textContent = `✅ Etapa importada em operação única (${selected.length} oficiais).`;
@@ -202,7 +210,7 @@ async function importarEtapaV2() {
         if (status) status.textContent = `❌ ${error.message || error}`;
         try {
             const { campRef } = await prepararDocumentoCampeonato(campeonato);
-            await campRef.collection("resultado_final").doc(getResultadoFinalDocId(etapa, dataCorrida)).set({ stageImport: { status: "error", message: String(error.message || error), failedAtISO: new Date().toISOString() }, dashboardOculto: true }, { merge: true });
+            if (!sourcesPersisted) await campRef.collection("resultado_final").doc(getResultadoFinalDocId(etapa, dataCorrida)).set({ stageImport: { status: "error", message: String(error.message || error), failedAtISO: new Date().toISOString() }, dashboardOculto: true }, { merge: true });
         } catch (_) { /* mantém o erro original */ }
     }
 }
@@ -6551,6 +6559,18 @@ async function dashboardBuscarVoltasEtapaParaPersistir(campRef, meta, conteudoVo
         };
     }
 
+    // Canonical V2 source: one bounded document per pilot. Reprocessing after a
+    // refresh does not depend on File objects or on reparsing the raw backup.
+    const stageId = meta?.resultadoDocId || getResultadoFinalDocId(meta?.etapa, meta?.dataCorrida);
+    if (stageId) {
+        const perPilot = await campRef.collection("resultado_final").doc(stageId).collection("volta_a_volta_pilotos").get();
+        const rows = perPilot.docs.flatMap(doc => {
+            const pilot = doc.data() || {};
+            return (pilot.laps || []).map(lap => ({ ...lap, pilot_uid: pilot.pilot_uid || doc.id, driver_id: pilot.driver_id || null, driver_name: pilot.driver_name || "", kart_numero: pilot.kart_numero || pilot.kart_number || "", isChampionship: !!pilot.isChampionship }));
+        });
+        if (rows.length) return { voltas: rows, fonte: { idImportacao: perPilot.docs[0]?.data()?.idImportacao || meta?.stageSources?.lapByLap?.importId || "", nomeArquivo: meta?.stageSources?.lapByLap?.filename || "", origem: "volta_a_volta_pilotos" } };
+    }
+
     // V2 canonical source, followed by fields retained for old imports. Raw
     // content lives in the independent backup document and survives a refresh.
     const importIds = [
@@ -6815,6 +6835,7 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
         dashboardResumoVersao: DASHBOARD_RESUMO_VERSION,
         dashboardResumoAtualizadoEmISO: new Date().toISOString()
     }), { merge: true });
+    console.info(`[Kart/FirestoreSize] dashboardResumo: ${(warnLargeFirestoreDocument("dashboardResumo", resumo) / 1024).toFixed(1)} KB`);
 
     if (atualizarGeral) await recalcularPersistirResumoGeralDashboard(campeonatoDocId, campeonato);
     limparCacheDashboardCampeonato(campeonatoDocId);
@@ -6906,6 +6927,16 @@ function validarInvariantesGridEtapa(analytics, pilotAnalytics) {
         const expectedDelta = gridRow && lap1Row ? gridRow.positionOverall - lap1Row.positionOverall : null;
         if ((pilot.start?.deltaOverall ?? null) !== expectedDelta) throw new Error(`[Kart/GridInvariant] delta inválido: ${uid}`);
     });
+}
+
+function estimateFirestoreDocumentSize(data) {
+    return StageImportV2.estimateFirestoreDocumentSize(toFirestoreSafe(data));
+}
+
+function warnLargeFirestoreDocument(label, data) {
+    const bytes = estimateFirestoreDocumentSize(data);
+    if (bytes > 750 * 1024) console.warn(`[Kart/FirestoreSize] ${label} tem ${(bytes / 1024).toFixed(1)} KB`, { bytes });
+    return bytes;
 }
 
 async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonato, fonte = {}, stat = null, meta = {}) {
@@ -7039,7 +7070,7 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
         ...pilotosAnalyticsAntigos.docs.map(doc => ({ tipo: "delete", ref: doc.ref }))
     ];
     if (!voltas?.length) {
-        const ops = [...limpeza, { tipo: "set", ref: analyticsRef, payload: { analyticsVersion: KartAnalytics.VERSION, available: false, fonte: fonte || {}, processedAt: new Date().toISOString() } }];
+        const ops = [...limpeza, { tipo: "delete", ref: analyticsRef }];
         pilotAnalytics.forEach(item => ops.push({ tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(FirestoreIntegrity.requireFirestoreId(item.pilot_uid, "pilot_uid", { etapaId: meta?.resultadoDocId })), payload: item }));
         await executarBatchFirestore(ops);
         return null;
@@ -7065,8 +7096,10 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     const validation = FirestoreIntegrity.validateStageAnalytics({ officialDrivers: pilotosLista, regularity: analytics.regularidade, qualifying: stat?.classificacao, overtakes: analytics.ultrapassagensCampeonato, pilotAnalytics, snapshots: analytics.snapshots }, getPilotUid);
     analyticsValidation.consistency = validation;
     validation.snapshots.forEach(snapshot => { if (snapshot.missing.length) console.warn("[Kart/Snapshot]", snapshot); });
-    const ops = [...limpeza,
-        { tipo: "set", ref: analyticsRef, payload: toFirestoreSafe({ ...analytics, startAnalytics: Object.fromEntries(analytics.startAnalytics || []), analyticsValidation, stageHighlights: persistedStageHighlights, available: true, fonte: fonte || {}, processedAt: new Date().toISOString() }) },
+    // `analytics` intentionally remains in memory. In particular participants,
+    // snapshots, raceOvertakes/transitionBreakdown and the complete lap ledger
+    // must never be serialized into one Firestore document.
+    const ops = [...limpeza, { tipo: "delete", ref: analyticsRef },
         { tipo: "set", ref: resultadoDocRef, payload: toFirestoreSafe({ stageHighlights: persistedStageHighlights, officialPilotUids: [...officialPilotUids], analyticsVersion: KartAnalytics.VERSION }) }
     ];
     participantes.forEach((p, id) => ops.push({ tipo: "set", ref: resultadoDocRef.collection("participantes_etapa").doc(FirestoreIntegrity.requireFirestoreId(id, "pilot_uid", { etapaId: meta?.resultadoDocId, collection: "participantes_etapa" })), payload: p }));
@@ -7080,6 +7113,11 @@ async function persistirAnalyticsEtapa(resultadoDocRef, voltas, pilotosCampeonat
     pilotAnalytics.forEach(item => ops.push({
         tipo: "set", ref: resultadoDocRef.collection("pilot_analytics").doc(FirestoreIntegrity.requireFirestoreId(item.pilot_uid, "pilot_uid", { etapaId: meta?.resultadoDocId, collection: "pilot_analytics" })), payload: item
     }));
+    const sizeGroups = {
+        "lapByLap pilot": [...porPiloto.values()].map(laps => ({ pilot_uid: getPilotUid(laps[0]), laps })),
+        "pilot analytics": pilotAnalytics
+    };
+    Object.entries(sizeGroups).forEach(([label, docs]) => console.info(`[Kart/FirestoreSize] Largest ${label} doc: ${Math.max(0, ...docs.map(doc => warnLargeFirestoreDocument(label, doc))) / 1024} KB`));
     await executarBatchFirestore(ops);
     console.debug("[Kart/PilotAnalytics]", { campeonato: meta?.campeonato_id, etapa: meta?.resultadoDocId, officialCount: officialPilotUids.size, pilotAnalyticsCount: pilotAnalytics.length, pilotSummaryCount: officialPilotUids.size });
     if (officialPilotUids.size !== pilotAnalytics.length) console.warn("[Kart/PilotAnalytics] quantidade inconsistente", { officialCount: officialPilotUids.size, pilotAnalyticsCount: pilotAnalytics.length });
@@ -7128,9 +7166,17 @@ async function carregarAnalyticsEtapa(resultadoDocRef) {
     // A etapa ja foi hidratada e a lista oficial ja foi montada a partir da
     // mesma corrida exibida. Aqui consultamos somente analytics, sem tentar
     // redescobrir os participantes em outras collections.
-    const snap = await resultadoDocRef.collection("analytics").doc("volta_a_volta_v1").get();
-    if (!snap.exists) return null;
-    const data = snap.data() || {};
+    const [stageSnap, lapsSnap, classificationSnap] = await Promise.all([
+        resultadoDocRef.get(),
+        resultadoDocRef.collection("volta_a_volta_pilotos").get(),
+        resultadoDocRef.collection("classificacao").get()
+    ]);
+    const stageMeta = stageSnap.data() || {};
+    const laps = lapsSnap.docs.flatMap(doc => {
+        const pilot = doc.data() || {};
+        return (pilot.laps || []).map(lap => ({ ...lap, pilot_uid: pilot.pilot_uid || doc.id, driver_id: pilot.driver_id || null, driver_name: pilot.driver_name || "", kart_numero: pilot.kart_numero || pilot.kart_number || "", isChampionship: !!pilot.isChampionship }));
+    });
+    if (!laps.length) return null;
     const resultadoRows = DASHBOARD_STAGE_STATE.pilotosCampeonatoEtapa;
     const oficiais = pilotosOficiaisAtuais();
     const marcarOficial = item => ({
@@ -7138,31 +7184,17 @@ async function carregarAnalyticsEtapa(resultadoDocRef) {
         driver_id: getDriverId(item),
         isChampionship: isChampionshipDriver(item, oficiais)
     });
-    const participants = (data.participants || []).map(marcarOficial);
-    const regularidade = (data.regularidade || []).map(marcarOficial);
-    const snapshots = (data.snapshots || []).map(snapshot => ({
-        ...snapshot,
-        positions: (snapshot.positions || []).map(marcarOficial)
-    }));
-
-    const analyticsAtual = Number(data.analyticsVersion) >= KartAnalytics.VERSION;
-    const possuiGridCanonico = snapshots[0]?.snapshotType === "grid"
-        && Number(snapshots[0]?.numeroVolta ?? snapshots[0]?.lap) === 0;
-    if (!analyticsAtual && !possuiGridCanonico) {
-        // Sem o grid da classificação não existe referência válida para
-        // recomputar GRID -> V1. Falhar explicitamente é mais seguro que
-        // reapresentar os arrays antigos ou fabricar uma largada.
-        throw new Error(`[Kart/Overtakes] analytics v${data.analyticsVersion ?? 0} incompatível; reprocesse a etapa com v${KartAnalytics.VERSION}`);
-    }
-    const ultrapassagensCampeonatoBase = analyticsAtual && Array.isArray(data.ultrapassagensCampeonato)
-        ? data.ultrapassagensCampeonato
-        : KartAnalytics.calcularUltrapassagens(snapshots, true, participants);
-    const ultrapassagensGeralBase = analyticsAtual && Array.isArray(data.ultrapassagensGeral)
-        ? data.ultrapassagensGeral
-        : KartAnalytics.calcularUltrapassagens(snapshots, false, participants);
+    const classification = classificationSnap.docs.map(doc => ({ pilot_uid: doc.id, ...(doc.data() || {}) }));
+    const rebuilt = KartAnalytics.processarVoltasEtapa(laps, resultadoRows, classification);
+    const participants = (rebuilt.participants || []).map(marcarOficial);
+    const regularidade = (rebuilt.regularidade || []).map(marcarOficial);
+    const snapshots = (rebuilt.snapshots || []).map(snapshot => ({ ...snapshot, positions: (snapshot.positions || []).map(marcarOficial) }));
+    const ultrapassagensCampeonatoBase = rebuilt.ultrapassagensCampeonato || KartAnalytics.calcularUltrapassagens(snapshots, true, participants);
+    const ultrapassagensGeralBase = rebuilt.ultrapassagensGeral || KartAnalytics.calcularUltrapassagens(snapshots, false, participants);
 
     return {
-        ...data,
+        ...rebuilt,
+        analyticsVersion: stageMeta.analyticsVersion || KartAnalytics.VERSION,
         participants,
         regularidade,
         snapshots,

@@ -131,3 +131,22 @@ test("manifesto V2 cria três import IDs independentes e fontes recuperáveis", 
     assert.equal(manifest.stageSources.lapByLap.importId, "kart__2026-08-16__etapa_3__laps");
     assert.equal(manifest.stageSources.lapByLap.backupPath, "backups_importacao/kart__2026-08-16__etapa_3__laps");
 });
+
+test("persistência canônica distribui 441 voltas em 30 documentos determinísticos", () => {
+    const drivers = Array.from({ length: 30 }, (_, i) => ({ driver_id: `D${i}`, driver_name: `PILOTO ${i}`, kart_numero: String(i + 1), positionOverall: i + 1, melhor_tempo: "1:01.000" }));
+    const lapRows = [];
+    drivers.forEach((driver, driverIndex) => {
+        const count = driverIndex < 21 ? 15 : 14; // 21*15 + 9*14 = 441
+        for (let lap = 1; lap <= count; lap += 1) lapRows.push({ ...driver, volta: lap, lap, tempo: 61 + driverIndex / 100, positionOverall: driverIndex + 1 });
+    });
+    const participants = StageImportV2.buildStageParticipants({ qualifying: drivers, result: drivers, laps: lapRows }).participants;
+    const official = participants.slice(0, 5).map(p => p.pilot_uid);
+    const docs = StageImportV2.buildCanonicalSourceDocuments({ qualifying: drivers, result: drivers, laps: lapRows, officialPilotUids: official, stageImportId: "stage-3", importIds: { qualifying: "q", result: "r", laps: "l" } });
+    assert.equal(docs.classificacao.length, 30);
+    assert.equal(docs.pilotos_resultado.length, 30);
+    assert.equal(docs.volta_a_volta_pilotos.length, 30);
+    assert.equal(docs.volta_a_volta_pilotos.reduce((sum, doc) => sum + doc.laps.length, 0), 441);
+    assert.equal(docs.volta_a_volta_pilotos.filter(doc => doc.isChampionship).length, 5);
+    assert.ok(Math.max(...docs.volta_a_volta_pilotos.map(StageImportV2.estimateFirestoreDocumentSize)) < 750 * 1024);
+    assert.equal(new Set(docs.volta_a_volta_pilotos.map(doc => doc.pilot_uid)).size, 30);
+});
