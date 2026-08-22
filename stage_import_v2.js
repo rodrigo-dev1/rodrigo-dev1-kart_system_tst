@@ -45,7 +45,8 @@
             const observation = sourceObservation(raw, sourceType);
             const uid = text(raw.pilot_uid || raw.pilotUid);
             let participant = (uid && indexes.uid.get(uid)) || (observation.driver_id && indexes.id.get(observation.driver_id));
-            participant ||= indexes.name.get(observation.normalized_name) || indexes.nameKart.get(`${observation.normalized_name}|${observation.kart_number}`);
+            participant ||= indexes.nameKart.get(`${observation.normalized_name}|${observation.kart_number}`);
+            if (!participant && !observation.kart_number) participant = indexes.name.get(observation.normalized_name);
             if (participant && participant.driver_id && observation.driver_id && participant.driver_id !== observation.driver_id) {
                 participant.conflict = true;
                 conflicts.push({ code: "DRIVER_ID_CONFLICT", pilot_uid: participant.pilot_uid, sourceType, expected: participant.driver_id, actual: observation.driver_id });
@@ -86,8 +87,16 @@
         errors.push(...built.conflicts);
         const overlap = built.participants.filter(p => p.sources.qualifying && p.sources.result).length;
         if (files.qualifying?.length && files.result?.length && !overlap) errors.push({ code: "NO_PARTICIPANT_OVERLAP" });
-        built.participants.filter(p => Object.values(p.sources).filter(Boolean).length === 2).forEach(p => warnings.push({ code: "PARTICIPANT_IN_TWO_SOURCES", pilot_uid: p.pilot_uid }));
-        return { valid: errors.length === 0, errors, warnings, participantCount: built.participants.length, overlap };
+        built.participants.filter(p => Object.values(p.sources).filter(Boolean).length !== 3).forEach(p => errors.push({ code: "PARTICIPANT_SOURCE_MISMATCH", pilot_uid: p.pilot_uid, sources: p.sources }));
+        const lapDrivers = built.participants.filter(p => p.sources.laps).length;
+        return {
+            valid: errors.length === 0, compatible: errors.length === 0, errors, warnings,
+            participantCount: built.participants.length, overlap,
+            qualifyingDrivers: built.participants.filter(p => p.sources.qualifying).length,
+            resultDrivers: built.participants.filter(p => p.sources.result).length,
+            lapDrivers, lapRecords: Array.isArray(files.laps) ? files.laps.length : 0,
+            conflicts: errors
+        };
     }
 
     function processStage({ qualifying = [], result = [], laps = [], officialPilotUids = [], scoring = {}, poleBonus = 1, bestLapBonus = 1 }) {

@@ -10,7 +10,6 @@ from typing import Optional
 import pandas as pd
 if sys.platform == "emscripten":
     from js import document, window
-    from pyodide.ffi.wrappers import add_event_listener
 
 COLUNAS_RENAME = {
     "Pos": "posicao_final",
@@ -352,11 +351,6 @@ def set_html(element_id: str, html: str) -> None:
         element.innerHTML = html
 
 
-def tipo_arquivo_atual() -> str:
-    select = document.getElementById("imp_tipo_arquivo")
-    return str(select.value) if select is not None else ""
-
-
 def label_tipo_arquivo(tipo: str) -> str:
     return {
         "resultado_final": "Resultado final",
@@ -403,59 +397,38 @@ async def get_text_from_file(file) -> str:
     return data.decode("utf-8", errors="ignore")
 
 
-async def ler_arquivo_importacao(event) -> None:
-    global LAST_DF
+def detectar_tipo_fonte(html: str) -> str:
+    """Detecta a fonte pelo conteúdo; o nome do arquivo nunca decide seu tipo."""
+    texto = limpar_texto(re.sub(r"<[^>]+>", " ", html)).upper()
+    if "TEMPOS DE VOLTA" in texto:
+        return "volta_a_volta"
+    if re.search(r"\bTOMADA\s*\d*\b", texto):
+        return "classificacao"
+    if re.search(r"\bPROVA\s*\d*\b", texto) and "RESULTADOS" in texto:
+        return "resultado_final"
+    return "desconhecido"
 
-    try:
-        tipo_arquivo = tipo_arquivo_atual()
-        file_list = event.target.files
-        file = file_list.item(0) if file_list and file_list.length else None
 
-        if file is None:
-            set_html("pyStatus", "Selecione o tipo de arquivo e depois escolha o arquivo.")
-            window.IMPORTACAO_PYSCRIPT_JSON = ""
-            return
-
-        nome_arquivo = str(file.name)
-
-        if tipo_arquivo == "volta_a_volta":
-            html = await get_text_from_file(file)
-            registros = parse_volta_a_volta(html, nome_arquivo)
-            LAST_DF = pd.DataFrame(registros)
-            serializar_para_js(LAST_DF, nome_arquivo, tipo_arquivo)
-            set_html("pyStatus", f"✅ Volta a volta estruturado: {len(registros)} volta(s) identificada(s).")
-            return
-
-        if tipo_arquivo not in {"resultado_final", "classificacao"}:
-            LAST_DF = None
-            window.IMPORTACAO_PYSCRIPT_JSON = ""
-            set_html("pyStatus", "ℹ️ Selecione Resultado final, Classificação ou Volta a volta.")
-            return
-
-        set_html("pyStatus", f"⏳ Lendo {nome_arquivo} com PyScript/Python...")
-
-        html = await get_text_from_file(file)
+def parse_stage_file(html: str, nome_arquivo: str, tipo_arquivo: str) -> str:
+    """Bridge V2 desacoplado do DOM: recebe conteúdo, nome e tipo explicitamente."""
+    if tipo_arquivo not in {"classificacao", "resultado_final", "volta_a_volta"}:
+        raise ValueError(f"Tipo de fonte inválido: {tipo_arquivo}")
+    detectado = detectar_tipo_fonte(html)
+    if detectado != tipo_arquivo:
+        raise ValueError(f"TYPE_MISMATCH expected={tipo_arquivo} detected={detectado}")
+    if tipo_arquivo == "volta_a_volta":
+        registros = parse_volta_a_volta(html, nome_arquivo)
+    else:
         df = carregar_tabela_corrida_html_texto(html, nome_arquivo, tipo_arquivo)
-        LAST_DF = df
-
-        serializar_para_js(df, nome_arquivo, tipo_arquivo)
-        set_html("pyStatus", f"✅ Leitura concluída: {len(df)} piloto(s) identificado(s). Use a lista única abaixo para marcar os pilotos e gerar a prévia.")
-
-    except Exception as exc:
-        LAST_DF = None
-        set_html("pyStatus", f"❌ Erro ao ler arquivo com PyScript: {exc}")
-        window.IMPORTACAO_PYSCRIPT_JSON = ""
+        df = df.astype(object).where(pd.notna(df), None)
+        registros = df.to_dict(orient="records")
+    return json.dumps({"arquivo": nome_arquivo, "tipo": tipo_arquivo, "detectedType": detectado, "registros": registros}, ensure_ascii=False, default=str)
 
 
 def inicializar() -> None:
-    input_importacao = document.getElementById("fileImportacaoUnico")
-
-    if input_importacao is None:
-        set_html("pyStatus", "❌ Input fileImportacaoUnico não encontrado no HTML.")
-        return
-
-    add_event_listener(input_importacao, "change", ler_arquivo_importacao)
-    set_html("pyStatus", "✅ PyScript carregado. Selecione Resultado final, Classificação ou Volta a volta e escolha o arquivo.")
+    """Registra somente a API V2; a ausência de qualquer input nunca aborta o Python."""
+    window.parseStageFile = parse_stage_file
+    set_html("pyStatus", "✅ Leitor Python pronto para Tomada, Resultado e Volta a volta.")
 
 
 if sys.platform == "emscripten":
