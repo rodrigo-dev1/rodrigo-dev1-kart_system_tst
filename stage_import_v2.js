@@ -60,7 +60,13 @@
                 conflicts.push({ code: "DRIVER_ID_CONFLICT", pilot_uid: participant.pilot_uid, sourceType, expected: participant.driver_id, actual: observation.driver_id });
             }
             if (!participant) {
-                const resolved = DriverIdentity.resolvePilotIdentity(observation, registry);
+                // Rows already reconciled with the Firestore identity registry must
+                // keep that UID. Re-resolving only from driver_id here used to turn
+                // a registry UID back into a generated UID and made the selected
+                // official disappear from the result payload.
+                const resolved = uid
+                    ? { identity: DriverIdentity.mergePilotIdentity({ pilot_uid: uid }, observation) }
+                    : DriverIdentity.resolvePilotIdentity(observation, registry);
                 if (!registry.some(item => item.pilot_uid === resolved.identity.pilot_uid)) registry.push(resolved.identity);
                 participant = {
                     pilot_uid: resolved.identity.pilot_uid, driver_id: observation.driver_id || null,
@@ -134,6 +140,24 @@
         if (bestLap) bestLap.scoring.bonusBestLap = Number(bestLapBonus || 0);
         officialAnalytics.forEach(item => { item.scoring.total = item.scoring.base + item.scoring.bonusGrid + item.scoring.bonusBestLap; });
         return { participants: built.participants, analytics, qualifying: qualifyingRank.map(p => analytics.find(a => a.pilot_uid === p.pilot_uid)), result: resultRank.map(p => analytics.find(a => a.pilot_uid === p.pilot_uid)), highlights: { pole, bestLap } };
+    }
+
+    function validateStageCardinality({ participants = [], officialPilotUids = [] }) {
+        const official = new Set((officialPilotUids || []).map(text).filter(Boolean));
+        if (official.size !== (officialPilotUids || []).length) throw new Error("pilot_uid oficial vazio ou duplicado");
+        const byUid = new Map((participants || []).map(participant => [text(participant.pilot_uid), participant]));
+        const sourceLabels = { qualifying: "Classificação", result: "Resultado Final", laps: "Volta a volta" };
+        for (const pilotUid of official) {
+            const participant = byUid.get(pilotUid);
+            const displayName = participant?.display_name || participant?.driver_name || pilotUid;
+            for (const source of Object.keys(sourceLabels)) {
+                if (!participant?.sources?.[source]) {
+                    throw new Error(`Piloto oficial ausente no ${sourceLabels[source]} persistido: ${displayName}`);
+                }
+            }
+        }
+        const counts = Object.fromEntries(Object.keys(sourceLabels).map(source => [source, [...official].filter(uid => byUid.get(uid)?.sources?.[source]).length]));
+        return { selectedOfficialCount: official.size, officialQualifyingCount: counts.qualifying, officialResultCount: counts.result, officialLapDriverCount: counts.laps };
     }
 
     function createStageUid(championshipId, date, stageNumber) {
@@ -223,5 +247,5 @@
         return { classificacao: processed.participants.map(p => adapt(p, "qualifying")).filter(Boolean), resultado: processed.participants.map(p => adapt(p, "result")).filter(Boolean), voltaAVolta, processed };
     }
 
-    return { TYPES, seconds, formatLap, buildStageParticipants, validateStageFiles, processStage, createStageUid, createPersistenceManifest, estimateFirestoreDocumentSize, buildCanonicalSourceDocuments, buildLegacySavePayloads };
+    return { TYPES, seconds, formatLap, buildStageParticipants, validateStageFiles, validateStageCardinality, processStage, createStageUid, createPersistenceManifest, estimateFirestoreDocumentSize, buildCanonicalSourceDocuments, buildLegacySavePayloads };
 }));

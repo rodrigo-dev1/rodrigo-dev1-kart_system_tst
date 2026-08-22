@@ -174,3 +174,29 @@ test("adapter V2 restaura os payloads dos três savers legados", () => {
     assert.equal(payloads.voltaAVolta[0].voltas, 2);
     assert.equal(payloads.voltaAVolta[0].melhor_tempo, "1:02.000");
 });
+
+test("adapter preserva pilot_uid já reconciliado pelo registro", () => {
+    const canonicalUid = "pilot_registry_tales";
+    const withCanonicalTales = rows => rows.map(row => row.driver_id === "233543" ? { ...row, pilot_uid: canonicalUid } : row);
+    const canonicalFiles = {
+        qualifying: withCanonicalTales(qualifying),
+        result: withCanonicalTales(result),
+        laps: withCanonicalTales(result.map(row => ({ ...row, volta: 1, tempo_volta: row.melhor_tempo })))
+    };
+    const otherUids = StageImportV2.buildStageParticipants(canonicalFiles).participants
+        .filter(p => p.driver_id !== "233543").map(p => p.pilot_uid);
+    const payloads = StageImportV2.buildLegacySavePayloads({ ...canonicalFiles, officialPilotUids: [canonicalUid, ...otherUids], scoring: { 1: 20, 2: 17, 3: 15, 4: 13, 5: 11 } });
+
+    assert.equal(payloads.resultado.length, 5);
+    assert.equal(payloads.resultado.find(row => row.driver_id === "233543").pilot_uid, canonicalUid);
+    assert.equal(payloads.classificacao.find(row => row.driver_id === "233543").pilot_uid, canonicalUid);
+    assert.equal(payloads.voltaAVolta.find(row => row.driver_id === "233543").pilot_uid, canonicalUid);
+});
+
+test("cardinalidade impede dashboard parcial quando falta resultado oficial", () => {
+    const incomplete = StageImportV2.buildStageParticipants({ qualifying, result: result.filter(row => row.driver_id !== "233543"), laps }).participants;
+    assert.throws(
+        () => StageImportV2.validateStageCardinality({ participants: incomplete, officialPilotUids }),
+        /Piloto oficial ausente no Resultado Final persistido: TALES MOLINA/
+    );
+});

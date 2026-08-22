@@ -189,6 +189,13 @@ async function importarEtapaV2() {
             return canonical ? { ...row, pilot_uid: canonical.pilot_uid, driver_id: canonical.driver_id || participant.driver_id || "", driver_name: canonical.driver_name || participant.display_name } : row;
         })]));
         const legacy = StageImportV2.buildLegacySavePayloads({ ...files, officialPilotUids, scoring: PONTOS_PADRAO });
+        const cardinality = StageImportV2.validateStageCardinality({ participants: legacy.processed.participants, officialPilotUids });
+        console.table(legacy.processed.participants.filter(p => p.isChampionship).map(p => ({
+            NAME: p.display_name, PILOT_UID: p.pilot_uid, DRIVER_ID: p.driver_id,
+            OFFICIAL: true, HAS_QUALIFYING: p.sources.qualifying,
+            HAS_RESULT: p.sources.result, HAS_LAPS: p.sources.laps
+        })));
+        console.debug("[Kart/StageImportV2/Cardinality]", cardinality);
         const manifest = StageImportV2.createPersistenceManifest(stageUid, STAGE_IMPORT_V2_STATE.names);
         const { sourceConfig, stageSources } = manifest;
         const now = new Date().toISOString();
@@ -210,6 +217,36 @@ async function importarEtapaV2() {
         await salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, etapa, dataCorrida, selecionados: legacy.voltaAVolta, backupId: sourceConfig.laps.importId, nomeArquivo: STAGE_IMPORT_V2_STATE.names.laps });
         sourcesPersisted = true;
 
+        // Read back the exact documents that feed the dashboard. A partial save
+        // is an identity error and must never be promoted to a complete stage.
+        const [qualifyingRead, resultRead, lapsRead] = await Promise.all([
+            ref.collection("classificacao").get(),
+            ref.collection("pilotos_resultado").get(),
+            ref.collection("volta_a_volta_pilotos").get()
+        ]);
+        const readRows = (snapshot, importId) => snapshot.docs
+            .map(doc => ({ docId: doc.id, ...(doc.data() || {}) }))
+            .filter(row => String(row.idImportacao || "") === importId);
+        const persistedFiles = {
+            qualifying: readRows(qualifyingRead, sourceConfig.qualifying.importId),
+            result: readRows(resultRead, sourceConfig.result.importId),
+            laps: readRows(lapsRead, sourceConfig.laps.importId)
+        };
+        const persistedParticipants = StageImportV2.buildStageParticipants(persistedFiles).participants;
+        StageImportV2.validateStageCardinality({ participants: persistedParticipants, officialPilotUids });
+        const tales = value => DriverIdentity.normalizeDriverName(value?.driver_name || value?.display_name) === "tales molina";
+        const traceRow = (source, rows) => rows.find(tales) || null;
+        const talesParticipant = persistedParticipants.find(p => DriverIdentity.normalizeDriverName(p.display_name) === "tales molina");
+        console.log("[Tales/IdentityTrace]", {
+            qualifyingRaw: traceRow("qualifying", files.qualifying), resultRaw: traceRow("result", files.result), lapRaw: traceRow("laps", files.laps),
+            reconciledParticipant: talesParticipant, officialPilotUids,
+            qualifyingPersisted: traceRow("qualifying", persistedFiles.qualifying), resultPersisted: traceRow("result", persistedFiles.result), lapPersisted: traceRow("laps", persistedFiles.laps)
+        });
+        console.table(["qualifying", "result", "laps"].map(source => {
+            const row = traceRow(source, persistedFiles[source]);
+            return { source, name: row?.driver_name, pilot_uid: row?.pilot_uid, driver_id: row?.driver_id, docId: row?.docId };
+        }));
+
         // No dashboard/reprocessing runs until all three legacy saves exist.
         await recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, dataCorrida, conteudoVoltaAtual: STAGE_IMPORT_V2_STATE.contents.laps, nomeArquivoVoltaAtual: STAGE_IMPORT_V2_STATE.names.laps, idImportacaoVoltaAtual: sourceConfig.laps.importId, atualizarGeral: true });
         await ref.set({ stageImport: { status: "complete", files: { qualifying: true, result: true, lapByLap: true }, completedAtISO: new Date().toISOString() }, dashboardOculto: false }, { merge: true });
@@ -221,7 +258,7 @@ async function importarEtapaV2() {
         if (status) status.textContent = `❌ ${error.message || error}`;
         try {
             const { campRef } = await prepararDocumentoCampeonato(campeonato);
-            if (!sourcesPersisted) await campRef.collection("resultado_final").doc(getResultadoFinalDocId(etapa, dataCorrida)).set({ stageImport: { status: "error", message: String(error.message || error), failedAtISO: new Date().toISOString() }, dashboardOculto: true }, { merge: true });
+            await campRef.collection("resultado_final").doc(getResultadoFinalDocId(etapa, dataCorrida)).set({ stageImport: { status: "identity_error", message: String(error.message || error), failedAtISO: new Date().toISOString() }, dashboardOculto: true }, { merge: true });
         } catch (_) { /* mantém o erro original */ }
     }
 }
@@ -1707,6 +1744,7 @@ async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, eta
             idImportacao: backupId || "",
             qtdPilotosSelecionadosHistoria: selecionadosCanonicos.length,
             pilotosSelecionados: selecionadosCanonicos.map(p => ({
+                pilot_uid: p.pilot_uid,
                 driver_id: p.driver_id || p.id_piloto || "",
                 driver_name: p.driver_name || p.nome || "",
                 driver_id_arquivo: p.driver_id_arquivo || "",
@@ -1722,12 +1760,13 @@ async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, eta
     }), { merge: true });
 
     selecionadosCanonicos.forEach((piloto, idx) => {
-        const itemId = normalizarDocId(piloto.driver_id || piloto.id_piloto || piloto.driver_name || `piloto_${idx + 1}`);
+        const itemId = FirestoreIntegrity.requireFirestoreId(piloto.pilot_uid, "pilot_uid", { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "volta_a_volta", index: idx });
         const payloadBase = toFirestoreSafe({
             campeonato,
             campeonato_id: campeonatoDocId,
             etapa: Number(etapa),
             dataCorrida,
+            pilot_uid: piloto.pilot_uid,
             driver_id: piloto.driver_id || piloto.id_piloto || "",
             id_piloto: piloto.driver_id || piloto.id_piloto || "",
             driver_name: piloto.driver_name || piloto.nome || "-",
@@ -1744,6 +1783,7 @@ async function salvarPilotosSelecionadosVoltaAVoltaNoFirestore({ campeonato, eta
             somenteHistoria: true,
             historia_status: "pendente",
             selecionado_para_historia: true,
+            isChampionship: true,
             idImportacao: backupId || "",
             nomeArquivo: nomeArquivo || "",
             caminhoBackup: backupId ? `${COLLECTION_BACKUPS}/${backupId}` : "",
@@ -6778,6 +6818,9 @@ async function recalcularPersistirResumoEtapaDashboard({ campeonato, etapa, data
     );
     const voltasResolvidas = await resolverPersistirIdentidades(voltasPreCanonicas, classificacaoResolvida.identities, { campeonato_id: campeonatoDocId, etapa_id: resultadoDocId, fase: "volta_a_volta" });
     const voltasCanonicas = voltasResolvidas.rows.map(row => ({ ...row, isChampionship: oficiaisEtapa.uids.has(getPilotUid(row)) }));
+    const cardinalityParticipants = StageImportV2.buildStageParticipants({ qualifying: classificacao, result: corrida, laps: voltasCanonicas }).participants;
+    const cardinality = StageImportV2.validateStageCardinality({ participants: cardinalityParticipants, officialPilotUids: [...oficiaisEtapa.uids] });
+    console.debug("[Kart/Reprocess/Cardinality]", cardinality);
     // Preserve the complete race. Championship membership is persisted as a
     // flag and filtering is exclusively a presentation concern.
     const etapaObj = { docId: resultadoDocId, ref: resultadoDocRef, meta, corrida, classificacao, voltas: voltasCanonicas, officialPilotUids: oficiaisEtapa.uids };
